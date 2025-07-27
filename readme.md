@@ -149,4 +149,4 @@ The script generates two log files in the `/tmp/` directory for easy debugging a
 
 ## 📜 License
 
-This project is licensed under the MIT License. See the `LICENSE` file for details.
+This project is licensed under the Apache 2.0 License. See the `LICENSE` file for details.
