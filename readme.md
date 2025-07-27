@@ -53,9 +53,15 @@ All configuration is done by editing the variables at the top of the `reset_band
 ############################################################
 # 0. CONFIG
 ############################################################
+<<<<<<< HEAD
 HOST="1.1.1.1"
 KEY="aVoOyZ75cXGgwbAQAFuGa1haJNRsXhLJ"
 PASS="bhGXRTVwqDs9Zj3shVDuc6GJLRSa2lBV"
+=======
+HOST="85.133.221.224"
+KEY="bVoOyZ75cXGgwbAQAFuGa1haJNRsXhLJ"
+PASS="JhGXRTVwqDs9Zj3shVDuc6GJLRSa2lBV"
+>>>>>>> a95da423b4ccee89c79547ba9600cbd5481f29b3
 ```
 
 -   `HOST`: The IP address of your Virtualizor master node.
