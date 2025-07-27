@@ -95,6 +95,42 @@ PASS="bhGXRTVwqDs9Zj3shVDuc6GJLRSa2lBV"
         ./reset_band.sh -m all
         ```
 
+        
+
+![photo_2025-07-27_18-15-47](https://github.com/user-attachments/assets/7902c11f-364c-463a-a53e-3526ca454d5d)
+
+![photo_2025-07-27_18-15-53](https://github.com/user-attachments/assets/65aea445-f929-4b4f-a964-3277829c4575)
+![photo_2025-07-27_18-15-56](https://github.com/user-attachments/assets/422cc8bf-f4cd-4ffd-8fa0-45b46cab6bdc)
+
+
+
+
+
+---
+
+## 🗓️ Automation with Cron
+
+To run the script automatically, you can set up a cron job.
+
+1.  Open your crontab file for editing:
+    ```bash
+    crontab -e
+    ```
+
+2.  Add a line to schedule the script. Be sure to use the **full path** to your script.
+
+    * **Monthly Reset:** To run the script for all servers at 2:00 AM on the first day of every month:
+      ```crontab
+      0 2 1 * * /usr/bin/bash /path/to/your/reset_band.sh -m all >/dev/null 2>&1
+      ```
+
+    * **Daily Reset (for testing):** To run the script every day at 3:30 AM:
+      ```crontab
+      30 3 * * * /usr/bin/bash /path/to/your/reset_band.sh -m all >/dev/null 2>&1
+      ```
+
+**Note:** Redirecting the output to `>/dev/null 2>&1` is recommended to prevent cron from sending unnecessary emails, as the script already manages its own log files.
+
 ---
 
 ## 📝 Logging
