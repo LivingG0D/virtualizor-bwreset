@@ -1,152 +1,82 @@
-# Virtualizor Bandwidth Carry-Over Script
+# Virtualizor Bandwidth Carry-Over Manager
 
-A powerful command-line tool designed to automate the process of resetting and carrying over unused bandwidth for Virtualizor-based VPSs. Instead of simply resetting bandwidth to zero each month, this script calculates the unused data and sets it as the new limit for the next billing cycle, effectively allowing your users to keep what they didn't use.
+A user-friendly, menu-driven command-line tool to automate the process of resetting and carrying over unused bandwidth for Virtualizor-based VPSs. This script allows you to manage the entire process, from configuration to manual runs and cron job automation, through a simple interface.
 
----
+**Created by LivingGOD**
 
-## ➤ Overview
-
-This script interacts with the Virtualizor Admin API to perform a "carry-over" bandwidth reset. For each targeted VPS, it:
-1.  Fetches the current month's bandwidth statistics (limit and usage).
-2.  Calculates the remaining (unused) bandwidth.
-3.  Resets the bandwidth usage counter to zero.
-4.  Updates the VPS plan to set the new bandwidth limit to the amount that was previously unused.
-
-This process is ideal for hosting providers who want to offer bandwidth carry-over as a premium feature.
-
----
+<img width="822" height="451" alt="image_2025-07-28_00-34-27" src="https://github.com/user-attachments/assets/f3b14d29-bd32-4587-b139-75757c1c1bc8" />
 
 ## ✨ Features
 
--   **Flexible Targeting:** Reset bandwidth for a single VPS, a specific list of VPSs, or all servers on the node.
--   **Intelligent Calculation:** Automatically calculates unused bandwidth and applies it as the new limit.
--   **Plan Preservation:** Preserves the original service plan (`plid`) to avoid accidental upgrades or downgrades.
--   **Safe & Robust:** Includes health checks, error handling, and detailed logging.
--   **Idempotent:** Skips servers on unlimited plans to prevent errors.
+* **All-in-One Interface:** Manage configuration, manual resets, and automation from a single command.
 
----
+* **Dedicated Configuration:** Safely stores your API credentials in `/etc/vps_manager.conf`.
 
-## 🔧 Prerequisites
+* **Intelligent Carry-Over:** Calculates unused bandwidth and applies it as the new limit for the next billing cycle.
 
-Before running this script, ensure the following command-line utilities are installed on your system:
+* **Flexible Targeting:** Reset bandwidth for a single VPS or all servers on the node.
 
--   `curl`: Used for making API requests.
--   `jq`: A lightweight and flexible command-line JSON processor.
+* **Full Automation:** Easily set up, view, and remove daily or monthly cron jobs.
 
-You can install them on most Linux distributions using the system's package manager:
+* **Safe & Robust:** Includes dependency checks, robust error handling, and detailed logging to `/tmp/reset_band.log`.
 
-```bash
-# On CentOS / RHEL / AlmaLinux
-sudo yum install curl jq
+## 🚀 Installation
 
-# On Debian / Ubuntu
-sudo apt-get install curl jq
+Use one of the following one-line commands to download the script to `/root/`, make it executable, and run it for the first time.
+
+**Using `wget`:**
 ```
-
----
-
-## ⚙️ Configuration
-
-All configuration is done by editing the variables at the top of the `reset_band.sh` script file.
-
-```bash
-############################################################
-# 0. CONFIG
-############################################################
-<<<<<<< HEAD
-HOST="1.1.1.1"
-KEY="aVoOyZ75cXGgwbAQAFuGa1haJNRsXhLJ"
-PASS="bhGXRTVwqDs9Zj3shVDuc6GJLRSa2lBV"
+wget -O /root/vps_manager.sh \
+  https://github.com/LivingG0D/virtualizor-bwreset/releases/download/0.2/reset_band.sh && \
+chmod +x /root/vps_manager.sh && \
+/root/vps_manager.sh
 
 ```
 
--   `HOST`: The IP address of your Virtualizor master node.
--   `KEY` / `PASS`: Your Virtualizor Admin API credentials. Ensure the API key has privileges to **List VPS**, **Edit VPS**, and **Reset Bandwidth**.
+**Using `curl`:**
+```
+curl -L -o /root/vps_manager.sh \
+  https://github.com/LivingG0D/virtualizor-bwreset/releases/download/0.2/reset_band.sh && \
+chmod +x /root/vps_manager.sh && \
+/root/vps_manager.sh
 
----
+```
 
-## 🚀 Usage
+## ⚙️ First-Time Setup
 
-1.  **Save the Script:** Save the code as `reset_band.sh`.
+The first time you run the script, it will automatically create a configuration file at `/etc/vps_manager.conf`.
 
-2.  **Make it Executable:**
-    ```bash
-    chmod +x reset_band.sh
-    ```
+1. Run the script: `/root/vps_manager.sh`
 
-3.  **Run the Script:**
+2. Select **1. Configure Script** from the main menu.
 
-    * **To reset a single VPS:**
-        ```bash
-        ./reset_band.sh -m single -v <VPS_ID>
-        # Example
-        ./reset_band.sh -m single -v 901
-        ```
+3. Enter your Virtualizor Host IP, API Key, and API Password.
 
-    * **To reset a specific list of VPSs:**
-        ```bash
-        ./reset_band.sh -m single -v <ID1,ID2,ID3>
-        # Example
-        ./reset_band.sh -m single -v 901,905,912
-        ```
+Your credentials are now saved, and you can proceed to use the other script features.
 
-    * **To reset all VPSs on the node:**
-        ```bash
-        ./reset_band.sh -m all
-        ```
+## 🔧 Usage
 
-        
+* **Configure:** Edit your API credentials.
 
-![photo_2025-07-27_18-15-47](https://github.com/user-attachments/assets/7902c11f-364c-463a-a53e-3526ca454d5d)
+* **Manual Reset:** Immediately run the bandwidth carry-over for all servers or a specific VPS ID. The results of the operation will be displayed on screen.
 
-![photo_2025-07-27_18-15-53](https://github.com/user-attachments/assets/65aea445-f929-4b4f-a964-3277829c4575)
-![photo_2025-07-27_18-15-56](https://github.com/user-attachments/assets/422cc8bf-f4cd-4ffd-8fa0-45b46cab6bdc)
+* **Manage Automation:**
 
+  * Enable a daily or monthly cron job.
 
+  * Disable and remove any existing cron job set by this script.
 
+  * View the current status of the cron job.
 
-
----
-
-## 🗓️ Automation with Cron
-
-To run the script automatically, you can set up a cron job.
-
-1.  Open your crontab file for editing:
-    ```bash
-    crontab -e
-    ```
-
-2.  Add a line to schedule the script. Be sure to use the **full path** to your script.
-
-    * **Monthly Reset:** To run the script for all servers at 2:00 AM on the first day of every month:
-      ```crontab
-      0 2 1 * * /usr/bin/bash /path/to/your/reset_band.sh -m all >/dev/null 2>&1
-      ```
-
-    * **Daily Reset (for testing):** To run the script every day at 3:30 AM:
-      ```crontab
-      30 3 * * * /usr/bin/bash /path/to/your/reset_band.sh -m all >/dev/null 2>&1
-      ```
-
-**Note:** Redirecting the output to `>/dev/null 2>&1` is recommended to prevent cron from sending unnecessary emails, as the script already manages its own log files.
-
----
+  * Manually edit your crontab file using the `nano` editor.
 
 ## 📝 Logging
 
 The script generates two log files in the `/tmp/` directory for easy debugging and auditing:
 
--   `/tmp/reset_band.log`: A detailed, verbose log of all actions, including API connection status, targets, calculations, and any errors encountered.
--   `/tmp/reset_band_changes.log`: A clean, concise audit log that only contains entries for successfully processed servers, showing the "before and after" bandwidth states.
+* `/tmp/reset_band.log`: A detailed, verbose log of all actions.
 
-**Example `change_log` entry:**
-```
-2025-07-27 17:00:05T  VPS 901  3/3997 => 0/3994 (plan 2)
-```
-
----
-
+* `/tmp/reset_band_changes.log`: A clean audit log that only contains entries for successfully processed servers.
 ## 📜 License
 
-This project is licensed under the Apache 2.0 License. See the `LICENSE` file for details.
+This project is licensed under the MIT License.
