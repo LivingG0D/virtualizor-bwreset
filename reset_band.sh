@@ -4,7 +4,7 @@ set -euo pipefail
 ############################################################
 # 0. CONFIG
 ############################################################
-HOST="85.133.221.224"
+HOST="1.1.1.1"
 KEY="206auOuotSOdxTDxW9POSW4IlAF9WwjD"
 PASS="1YSlwHrSkhZyBxcAS8iJnEe1wUYaKhjm"
 
