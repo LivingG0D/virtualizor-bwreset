@@ -79,4 +79,4 @@ The script generates two log files in the `/tmp/` directory for easy debugging a
 * `/tmp/reset_band_changes.log`: A clean audit log that only contains entries for successfully processed servers.
 ## 📜 License
 
-This project is licensed under the MIT License.
+This project is licensed under the Apache-2.0 License.
