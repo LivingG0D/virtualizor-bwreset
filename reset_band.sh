@@ -6,6 +6,11 @@ set -euo pipefail
 error_handler() {
     local exit_code=$?
     echo "$(date '+%F %T') [FATAL] Script exited with code $exit_code at line $LINENO" | tee -a "$LOG_FILE" >&2
+    # Optionally print last 10 lines of log for context
+    if [ -f "$LOG_FILE" ]; then
+        echo "--- Last 10 log lines ---" >&2
+        tail -n 10 "$LOG_FILE" >&2
+    fi
     exit $exit_code
 }
 trap error_handler ERR
@@ -49,7 +54,11 @@ load_config() {
         } > "$CONFIG_FILE"
     fi
     # shellcheck source=/dev/null
-    source "$CONFIG_FILE"
+    if ! source "$CONFIG_FILE"; then
+        echo "[ERROR] Failed to load configuration from $CONFIG_FILE" | tee -a "$LOG_FILE" >&2
+        whiptail --title "Config Error" --msgbox "Failed to load configuration. Please check $CONFIG_FILE." 10 78
+        exit 2
+    fi
 }
 
 configure_script() {
@@ -88,22 +97,34 @@ run_reset_logic() {
         log_info "Fetching server data..."
         local vs_json
         vs_json=$(curl -sS "${api_base}&act=vs&api=json")
+        local curl_status=$?
+        if (( curl_status != 0 )) || [[ -z "$vs_json" ]]; then
+            log_error "API request failed (curl exit $curl_status, empty response). Check network and API credentials."
+            whiptail --title "API Error" --msgbox "Failed to fetch server data. Check network and API credentials." 10 78
+            return 2
+        fi
 
         local vps_ids=()
         if [[ "$mode" == "all" ]]; then
-            mapfile -t vps_ids < <(echo "$vs_json" | jq -r '.vs | keys_unsorted[]')
+            if ! mapfile -t vps_ids < <(echo "$vs_json" | jq -r '.vs | keys_unsorted[]'); then
+                log_error "Failed to parse VPS IDs from API response."
+                whiptail --title "Parse Error" --msgbox "Failed to parse VPS IDs from API response." 10 78
+                return 3
+            fi
         else
             if ! echo "$vs_json" | jq -e --arg vpsid "$mode" '.vs[$vpsid]' > /dev/null; then
-                    log_error "VPS ID $mode not found in API response."
-                    return 1
+                log_error "VPS ID $mode not found in API response."
+                whiptail --title "VPS Not Found" --msgbox "VPS ID $mode not found in API response." 10 78
+                return 4
             fi
             vps_ids=("$mode")
         fi
         log_info "Target VPS IDs: ${vps_ids[*]}"
 
         if [ ${#vps_ids[@]} -eq 0 ]; then
-                log_info "No target VPSs found. Exiting."
-                return 0
+            log_info "No target VPSs found. Exiting."
+            whiptail --title "No VPS Found" --msgbox "No target VPSs found. Exiting." 10 78
+            return 0
         fi
 
         for vpsid in "${vps_ids[@]}"; do
@@ -111,24 +132,35 @@ run_reset_logic() {
 
             local limit_str
             limit_str=$(echo "$vs_json" | jq -r --arg vpsid "$vpsid" '.vs[$vpsid].bandwidth // 0')
+            if [[ -z "$limit_str" ]]; then
+                log_error "Failed to get bandwidth limit for VPS $vpsid."
+                whiptail --title "Parse Error" --msgbox "Failed to get bandwidth limit for VPS $vpsid." 10 78
+                continue
+            fi
             local limit
             limit=$(echo "$limit_str" | awk '{printf "%d", $1}')
 
             if (( limit==0 )); then
-                    log_info "$vpsid → unlimited plan. Resetting usage only."
-                    local reset
-                    reset=$(curl -sS -X POST -w '\nHTTP_CODE:%{http_code}' "${api_base}&act=vs&bwreset=${vpsid}&api=json")
-                    local r_body=${reset%$'\n'HTTP_CODE:*}; local r_code=${reset##*HTTP_CODE:}
-                    if [[ "$r_code" != "200" || $(jq -r '.done //0' <<<"$r_body") -ne 1 ]]; then
-                         log_error "$vpsid → usage reset failed (HTTP $r_code) body: $r_body"
-                    else
-                         log_info "$vpsid → usage reset OK"
-                    fi
-                    continue
+                log_info "$vpsid → unlimited plan. Resetting usage only."
+                local reset
+                reset=$(curl -sS -X POST -w '\nHTTP_CODE:%{http_code}' "${api_base}&act=vs&bwreset=${vpsid}&api=json")
+                local r_body=${reset%$'\n'HTTP_CODE:*}; local r_code=${reset##*HTTP_CODE:}
+                if [[ "$r_code" != "200" || $(jq -r '.done //0' <<<"$r_body") -ne 1 ]]; then
+                    log_error "$vpsid → usage reset failed (HTTP $r_code) body: $r_body"
+                    whiptail --title "Reset Error" --msgbox "$vpsid → usage reset failed (HTTP $r_code)" 10 78
+                else
+                    log_info "$vpsid → usage reset OK"
+                fi
+                continue
             fi
 
             local used_str
             used_str=$(echo "$vs_json" | jq -r --arg vpsid "$vpsid" '.vs[$vpsid].used_bandwidth // 0')
+            if [[ -z "$used_str" ]]; then
+                log_error "Failed to get used bandwidth for VPS $vpsid."
+                whiptail --title "Parse Error" --msgbox "Failed to get used bandwidth for VPS $vpsid." 10 78
+                continue
+            fi
             local used
             used=$(echo "$used_str" | awk '{printf "%d", $1}')
             local plid
@@ -141,7 +173,9 @@ run_reset_logic() {
             reset=$(curl -sS -X POST -w '\nHTTP_CODE:%{http_code}' "${api_base}&act=vs&bwreset=${vpsid}&api=json")
             local r_body=${reset%$'\n'HTTP_CODE:*}; local r_code=${reset##*HTTP_CODE:}
             if [[ "$r_code" != "200" || $(jq -r '.done //0' <<<"$r_body") -ne 1 ]]; then
-                 log_error "$vpsid → reset failed (HTTP $r_code) body: $r_body"; continue
+                log_error "$vpsid → reset failed (HTTP $r_code) body: $r_body"
+                whiptail --title "Reset Error" --msgbox "$vpsid → reset failed (HTTP $r_code)" 10 78
+                continue
             fi
             log_info "Usage reset OK"
 
@@ -149,7 +183,9 @@ run_reset_logic() {
             update=$(curl -sS -w '\nHTTP_CODE:%{http_code}' -d "editvps=1" -d "bandwidth=$new_limit" -d "plid=${plid}" "${api_base}&act=managevps&vpsid=${vpsid}&api=json")
             local u_body=${update%$'\n'HTTP_CODE:*}; local u_code=${update##*HTTP_CODE:}
             if [[ "$u_code" != "200" || $(jq -r '.done.done //false' <<<"$u_body") != true ]]; then
-                 log_error "$vpsid → update failed (HTTP $u_code) body: $u_body"; continue
+                log_error "$vpsid → update failed (HTTP $u_code) body: $u_body"
+                whiptail --title "Update Error" --msgbox "$vpsid → update failed (HTTP $u_code)" 10 78
+                continue
             fi
             log_info "Limit updated (plan $plid preserved)"
             printf "%(%F %T)T  VPS %s  %d/%d => 0/%d (plan %d)\n" -1 "$vpsid" "$used" "$limit" "$new_limit" "$plid" >>"$CHANGE_LOG"
