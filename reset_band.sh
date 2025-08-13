@@ -1,5 +1,14 @@
+
 #!/usr/bin/env bash
 set -euo pipefail
+
+# Trap for error reporting and cleanup
+error_handler() {
+    local exit_code=$?
+    echo "$(date '+%F %T') [FATAL] Script exited with code $exit_code at line $LINENO" | tee -a "$LOG_FILE" >&2
+    exit $exit_code
+}
+trap error_handler ERR
 
 #================================================================
 #
@@ -11,6 +20,7 @@ set -euo pipefail
 #
 #================================================================
 
+
 # --- Script Configuration ---
 CONFIG_FILE="/etc/vps_manager.conf"
 CRON_TAG="# vps-bandwidth-reset-cron"
@@ -18,9 +28,9 @@ LOG_FILE="/tmp/reset_band.log"
 CHANGE_LOG="/tmp/reset_band_changes.log"
 
 # --- Dependency Check ---
-for cmd in whiptail curl jq; do
-    if ! command -v "$cmd" &> /dev/null; then
-        echo "Error: Command '$cmd' is not installed. Please install it to continue."
+for dep in whiptail curl jq; do
+    if ! command -v "$dep" &> /dev/null; then
+        echo "Error: Command '$dep' is not installed. Please install it to continue." >&2
         exit 1
     fi
 done
@@ -44,19 +54,20 @@ load_config() {
 
 configure_script() {
     # UI for editing the configuration file.
-    local CURRENT_HOST=$HOST
-    local CURRENT_KEY=$KEY
-    local CURRENT_PASS=$PASS
+    local current_host="$HOST"
+    local current_key="$KEY"
+    local current_pass="$PASS"
 
     # The `|| return 0` is to prevent `set -e` from exiting the script if the user cancels.
-    NEW_HOST=$(whiptail --title "Configure Host" --inputbox "Enter the Virtualizor Host IP:" 8 78 "$CURRENT_HOST" 3>&1 1>&2 2>&3) || return 0
-    NEW_KEY=$(whiptail --title "Configure API Key" --inputbox "Enter the API Key:" 8 78 "$CURRENT_KEY" 3>&1 1>&2 2>&3) || return 0
-    NEW_PASS=$(whiptail --title "Configure API Pass" --inputbox "Enter the API Password:" 8 78 "$CURRENT_PASS" 3>&1 1>&2 2>&3) || return 0
+    local new_host new_key new_pass
+    new_host=$(whiptail --title "Configure Host" --inputbox "Enter the Virtualizor Host IP:" 8 78 "$current_host" 3>&1 1>&2 2>&3) || return 0
+    new_key=$(whiptail --title "Configure API Key" --inputbox "Enter the API Key:" 8 78 "$current_key" 3>&1 1>&2 2>&3) || return 0
+    new_pass=$(whiptail --title "Configure API Pass" --inputbox "Enter the API Password:" 8 78 "$current_pass" 3>&1 1>&2 2>&3) || return 0
 
     {
-        echo "HOST=\"$NEW_HOST\""
-        echo "KEY=\"$NEW_KEY\""
-        echo "PASS=\"$NEW_PASS\""
+        echo "HOST=\"$new_host\""
+        echo "KEY=\"$new_key\""
+        echo "PASS=\"$new_pass\""
     } > "$CONFIG_FILE"
     whiptail --title "Success" --msgbox "Configuration has been updated in $CONFIG_FILE." 8 78
 }
@@ -65,169 +76,180 @@ configure_script() {
 #   CORE RESET LOGIC
 #================================================================
 run_reset_logic() {
-    local MODE=$1
-    local ERROR_FLAG=0
+        # Resets bandwidth for all or a specific VPS. Robust error handling and logging.
+        local mode="$1"
+        local error_flag=0
 
-    log_info()  { echo "$(date '+%F %T') [INFO]  $*"  | tee -a "$LOG_FILE"; }
-    log_error() { echo "$(date '+%F %T') [ERROR] $*" | tee -a "$LOG_FILE" >&2; ERROR_FLAG=1; }
+        log_info()  { echo "$(date '+%F %T') [INFO]  $*"  | tee -a "$LOG_FILE"; }
+        log_error() { echo "$(date '+%F %T') [ERROR] $*" | tee -a "$LOG_FILE" >&2; error_flag=1; }
 
-    local API_BASE="http://${HOST}:4084/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
+        local api_base="http://${HOST}:4084/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
 
-    log_info "Fetching server data..."
-    local VS_JSON
-    VS_JSON=$(curl -sS "${API_BASE}&act=vs&api=json")
+        log_info "Fetching server data..."
+        local vs_json
+        vs_json=$(curl -sS "${api_base}&act=vs&api=json")
 
-    local VPS_IDS=()
-    if [[ "$MODE" == "all" ]]; then
-      mapfile -t VPS_IDS < <(echo "$VS_JSON" | jq -r '.vs | keys_unsorted[]')
-    else
-      if ! echo "$VS_JSON" | jq -e --arg vpsid "$MODE" '.vs[$vpsid]' > /dev/null; then
-          log_error "VPS ID $MODE not found in API response."
-          return 1
-      fi
-      VPS_IDS=("$MODE")
-    fi
-    log_info "Target VPS IDs: ${VPS_IDS[*]}"
+        local vps_ids=()
+        if [[ "$mode" == "all" ]]; then
+            mapfile -t vps_ids < <(echo "$vs_json" | jq -r '.vs | keys_unsorted[]')
+        else
+            if ! echo "$vs_json" | jq -e --arg vpsid "$mode" '.vs[$vpsid]' > /dev/null; then
+                    log_error "VPS ID $mode not found in API response."
+                    return 1
+            fi
+            vps_ids=("$mode")
+        fi
+        log_info "Target VPS IDs: ${vps_ids[*]}"
 
-    if [ ${#VPS_IDS[@]} -eq 0 ]; then
-        log_info "No target VPSs found. Exiting."
-        return 0
-    fi
+        if [ ${#vps_ids[@]} -eq 0 ]; then
+                log_info "No target VPSs found. Exiting."
+                return 0
+        fi
 
-    for VPSID in "${VPS_IDS[@]}"; do
-      log_info "─ VPS $VPSID"
-      
-      local LIMIT_STR
-      LIMIT_STR=$(echo "$VS_JSON" | jq -r --arg vpsid "$VPSID" '.vs[$vpsid].bandwidth // 0')
-      local LIMIT
-      LIMIT=$(echo "$LIMIT_STR" | awk '{printf "%d", $1}')
-      
-      if (( LIMIT==0 )); then
-          log_info "$VPSID → unlimited plan. Resetting usage only."
-          local RESET
-          RESET=$(curl -sS -X POST -w '\nHTTP_CODE:%{http_code}' "${API_BASE}&act=vs&bwreset=${VPSID}&api=json")
-          local R_BODY=${RESET%$'\n'HTTP_CODE:*}; local R_CODE=${RESET##*HTTP_CODE:}
-          if [[ $R_CODE != 200 || $(jq -r '.done //0' <<<"$R_BODY") -ne 1 ]]; then
-             log_error "$VPSID → usage reset failed (HTTP $R_CODE) body: $R_BODY"
-          else
-             log_info "$VPSID → usage reset OK"
-          fi
-          continue
-      fi
+        for vpsid in "${vps_ids[@]}"; do
+            log_info "─ VPS $vpsid"
 
-      local USED_STR
-      USED_STR=$(echo "$VS_JSON" | jq -r --arg vpsid "$VPSID" '.vs[$vpsid].used_bandwidth // 0')
-      local USED
-      USED=$(echo "$USED_STR" | awk '{printf "%d", $1}')
-      local PLID
-      PLID=$(echo "$VS_JSON" | jq -r --arg vpsid "$VPSID" '.vs[$vpsid].plid // 0')
-      
-      local NEW_LIMIT=$(( LIMIT - USED )); (( NEW_LIMIT < 0 )) && NEW_LIMIT=0
-      log_info "$VPSID : ${USED}/${LIMIT} GB → 0/${NEW_LIMIT} GB"
-      
-      local RESET
-      RESET=$(curl -sS -X POST -w '\nHTTP_CODE:%{http_code}' "${API_BASE}&act=vs&bwreset=${VPSID}&api=json")
-      local R_BODY=${RESET%$'\n'HTTP_CODE:*}; local R_CODE=${RESET##*HTTP_CODE:}
-      if [[ $R_CODE != 200 || $(jq -r '.done //0' <<<"$R_BODY") -ne 1 ]]; then
-         log_error "$VPSID → reset failed (HTTP $R_CODE) body: $R_BODY"; continue
-      fi
-      log_info "Usage reset OK"
-      
-      local UPDATE
-      UPDATE=$(curl -sS -w '\nHTTP_CODE:%{http_code}' -d "editvps=1" -d "bandwidth=$NEW_LIMIT" -d "plid=${PLID}" "${API_BASE}&act=managevps&vpsid=${VPSID}&api=json")
-      local U_BODY=${UPDATE%$'\n'HTTP_CODE:*}; local U_CODE=${UPDATE##*HTTP_CODE:}
-      if [[ $U_CODE != 200 || $(jq -r '.done.done //false' <<<"$U_BODY") != true ]]; then
-         log_error "$VPSID → update failed (HTTP $U_CODE) body: $U_BODY"; continue
-      fi
-      log_info "Limit updated (plan $PLID preserved)"
-      printf "%(%F %T)T  VPS %s  %d/%d => 0/%d (plan %d)\n" -1 "$VPSID" "$USED" "$LIMIT" "$NEW_LIMIT" "$PLID" >>"$CHANGE_LOG"
-    done
-    log_info "=== Completed ==="
-    return $ERROR_FLAG
+            local limit_str
+            limit_str=$(echo "$vs_json" | jq -r --arg vpsid "$vpsid" '.vs[$vpsid].bandwidth // 0')
+            local limit
+            limit=$(echo "$limit_str" | awk '{printf "%d", $1}')
+
+            if (( limit==0 )); then
+                    log_info "$vpsid → unlimited plan. Resetting usage only."
+                    local reset
+                    reset=$(curl -sS -X POST -w '\nHTTP_CODE:%{http_code}' "${api_base}&act=vs&bwreset=${vpsid}&api=json")
+                    local r_body=${reset%$'\n'HTTP_CODE:*}; local r_code=${reset##*HTTP_CODE:}
+                    if [[ "$r_code" != "200" || $(jq -r '.done //0' <<<"$r_body") -ne 1 ]]; then
+                         log_error "$vpsid → usage reset failed (HTTP $r_code) body: $r_body"
+                    else
+                         log_info "$vpsid → usage reset OK"
+                    fi
+                    continue
+            fi
+
+            local used_str
+            used_str=$(echo "$vs_json" | jq -r --arg vpsid "$vpsid" '.vs[$vpsid].used_bandwidth // 0')
+            local used
+            used=$(echo "$used_str" | awk '{printf "%d", $1}')
+            local plid
+            plid=$(echo "$vs_json" | jq -r --arg vpsid "$vpsid" '.vs[$vpsid].plid // 0')
+
+            local new_limit=$(( limit - used )); (( new_limit < 0 )) && new_limit=0
+            log_info "$vpsid : ${used}/${limit} GB → 0/${new_limit} GB"
+
+            local reset
+            reset=$(curl -sS -X POST -w '\nHTTP_CODE:%{http_code}' "${api_base}&act=vs&bwreset=${vpsid}&api=json")
+            local r_body=${reset%$'\n'HTTP_CODE:*}; local r_code=${reset##*HTTP_CODE:}
+            if [[ "$r_code" != "200" || $(jq -r '.done //0' <<<"$r_body") -ne 1 ]]; then
+                 log_error "$vpsid → reset failed (HTTP $r_code) body: $r_body"; continue
+            fi
+            log_info "Usage reset OK"
+
+            local update
+            update=$(curl -sS -w '\nHTTP_CODE:%{http_code}' -d "editvps=1" -d "bandwidth=$new_limit" -d "plid=${plid}" "${api_base}&act=managevps&vpsid=${vpsid}&api=json")
+            local u_body=${update%$'\n'HTTP_CODE:*}; local u_code=${update##*HTTP_CODE:}
+            if [[ "$u_code" != "200" || $(jq -r '.done.done //false' <<<"$u_body") != true ]]; then
+                 log_error "$vpsid → update failed (HTTP $u_code) body: $u_body"; continue
+            fi
+            log_info "Limit updated (plan $plid preserved)"
+            printf "%(%F %T)T  VPS %s  %d/%d => 0/%d (plan %d)\n" -1 "$vpsid" "$used" "$limit" "$new_limit" "$plid" >>"$CHANGE_LOG"
+        done
+        log_info "=== Completed ==="
+        return $error_flag
 }
 
 #================================================================
 #   UI & MENU FUNCTIONS
 #================================================================
 manual_reset_menu() {
-    local CHOICE
-    CHOICE=$(whiptail --title "Manual Bandwidth Reset" --menu "Choose an option" 15 60 2 \
+    local choice
+    choice=$(whiptail --title "Manual Bandwidth Reset" --menu "Choose an option" 15 60 2 \
         "1" "Reset ALL VPSs" \
         "2" "Reset a SPECIFIC VPS" 3>&1 1>&2 2>&3) || return 0
 
-    case $CHOICE in
+    case "$choice" in
         1)
             whiptail --title "Confirm Reset All" --yesno "Are you sure you want to reset bandwidth for ALL servers?" 8 78
             if [ $? -eq 0 ]; then
                 # Clear log file for a clean view of this run
                 > "$LOG_FILE"
                 whiptail --infobox "Processing all servers, please wait..." 8 78
+                local title
                 if run_reset_logic "all"; then
-                    TITLE="Success"
+                    title="Success"
                 else
-                    TITLE="Failed"
+                    title="Failed"
                 fi
-                whiptail --title "$TITLE" --textbox "$LOG_FILE" 20 78 --scrolltext
+                whiptail --title "$title" --textbox "$LOG_FILE" 20 78 --scrolltext
             fi
             ;;
         2)
-            local VPS_ID
-            VPS_ID=$(whiptail --title "Specific VPS Reset" --inputbox "Enter the VPS ID to reset:" 8 78 3>&1 1>&2 2>&3) || return 0
-            if [ -n "$VPS_ID" ]; then
+            local vps_id
+            vps_id=$(whiptail --title "Specific VPS Reset" --inputbox "Enter the VPS ID to reset:" 8 78 3>&1 1>&2 2>&3) || return 0
+            if [ -n "$vps_id" ]; then
                 # Clear log file for a clean view of this run
                 > "$LOG_FILE"
-                whiptail --infobox "Processing VPS $VPS_ID, please wait..." 8 78
-                if run_reset_logic "$VPS_ID"; then
-                    TITLE="Success"
+                whiptail --infobox "Processing VPS $vps_id, please wait..." 8 78
+                local title
+                if run_reset_logic "$vps_id"; then
+                    title="Success"
                 else
-                    TITLE="Failed"
+                    title="Failed"
                 fi
-                whiptail --title "$TITLE" --textbox "$LOG_FILE" 20 78 --scrolltext
+                whiptail --title "$title" --textbox "$LOG_FILE" 20 78 --scrolltext
             fi
             ;;
     esac
 }
 
 automation_menu() {
-    local CHOICE
-    CHOICE=$(whiptail --title "Automation Management" --menu "Manage automated cron jobs" 17 78 5 \
+    local choice
+    choice=$(whiptail --title "Automation Management" --menu "Manage automated cron jobs" 19 78 6 \
         "1" "Enable DAILY Reset (00:00)" \
         "2" "Enable MONTHLY Reset (1st of month at 02:00)" \
-        "3" "DISABLE Automation" \
-        "4" "View Status" \
-        "5" "Manually Edit Crontab (nano)" 3>&1 1>&2 2>&3) || return 0
+        "3" "Enable LAST DAY Monthly Reset (23:30)" \
+        "4" "DISABLE Automation" \
+        "5" "View Status" \
+        "6" "Manually Edit Crontab (nano)" 3>&1 1>&2 2>&3) || return 0
 
     # Get the full, absolute path to the currently running script
-    local SCRIPT_FULL_PATH
-    SCRIPT_FULL_PATH=$(realpath "$0")
+    local script_full_path
+    script_full_path=$(realpath "$0")
 
-    case $CHOICE in
+    case "$choice" in
         1)
-            local CURRENT_CRON
-            CURRENT_CRON=$(crontab -l 2>/dev/null || true)
-            local CLEAN_CRON
-            CLEAN_CRON=$(echo "$CURRENT_CRON" | grep -vF "$CRON_TAG" || true)
-            printf "%s\n%s\n" "$CLEAN_CRON" "0 0 * * * /usr/bin/bash $SCRIPT_FULL_PATH --cron $CRON_TAG" | sed '/^$/d' | crontab -
+            local current_cron clean_cron
+            current_cron=$(crontab -l 2>/dev/null || true)
+            clean_cron=$(echo "$current_cron" | grep -vF "$CRON_TAG" || true)
+            printf "%s\n%s\n" "$clean_cron" "0 0 * * * /usr/bin/bash $script_full_path --cron $CRON_TAG" | sed '/^$/d' | crontab -
             whiptail --title "Success" --msgbox "Daily cron job enabled." 8 78
             ;;
         2)
-            local CURRENT_CRON
-            CURRENT_CRON=$(crontab -l 2>/dev/null || true)
-            local CLEAN_CRON
-            CLEAN_CRON=$(echo "$CURRENT_CRON" | grep -vF "$CRON_TAG" || true)
-            printf "%s\n%s\n" "$CLEAN_CRON" "0 2 1 * * /usr/bin/bash $SCRIPT_FULL_PATH --cron $CRON_TAG" | sed '/^$/d' | crontab -
+            local current_cron clean_cron
+            current_cron=$(crontab -l 2>/dev/null || true)
+            clean_cron=$(echo "$current_cron" | grep -vF "$CRON_TAG" || true)
+            printf "%s\n%s\n" "$clean_cron" "0 2 1 * * /usr/bin/bash $script_full_path --cron $CRON_TAG" | sed '/^$/d' | crontab -
             whiptail --title "Success" --msgbox "Monthly cron job enabled." 8 78
             ;;
         3)
+            local current_cron clean_cron
+            current_cron=$(crontab -l 2>/dev/null || true)
+            clean_cron=$(echo "$current_cron" | grep -vF "$CRON_TAG" || true)
+            # Last day of month at 23:30 workaround
+            local last_day_cron="30 23 * * * [ \"\$(date +\\%d -d tomorrow)\" == \"01\" ] && /usr/bin/bash $script_full_path --cron $CRON_TAG"
+            printf "%s\n%s\n" "$clean_cron" "$last_day_cron" | sed '/^$/d' | crontab -
+            whiptail --title "Success" --msgbox "Last day of month cron job enabled (23:30)." 8 78
+            ;;
+        4)
             (crontab -l 2>/dev/null || true) | grep -vF "$CRON_TAG" | crontab -
             whiptail --title "Success" --msgbox "All automation has been disabled." 8 78
             ;;
-        4)
-            local STATUS
-            STATUS=$(crontab -l 2>/dev/null | grep "$CRON_TAG" || echo "Automation is currently disabled.")
-            whiptail --title "Automation Status" --msgbox "$STATUS" 8 78
-            ;;
         5)
+            local status
+            status=$(crontab -l 2>/dev/null | grep "$CRON_TAG" || echo "Automation is currently disabled.")
+            whiptail --title "Automation Status" --msgbox "$status" 8 78
+            ;;
+        6)
             EDITOR=nano crontab -e
             whiptail --title "Crontab" --msgbox "Crontab editing session finished." 8 78
             ;;
@@ -250,13 +272,14 @@ load_config
 
 # Main interactive menu loop
 while true; do
-    CHOICE=$(whiptail --title "VPS Bandwidth Manager by LivingGOD" --menu "Select an option" 16 60 4 \
+    local choice
+    choice=$(whiptail --title "VPS Bandwidth Manager by LivingGOD" --menu "Select an option" 16 60 4 \
         "1" "Configure Script" \
         "2" "Manual Reset" \
         "3" "Manage Automation" \
         "4" "Exit" 3>&1 1>&2 2>&3) || exit 0
 
-    case $CHOICE in
+    case "$choice" in
         1)
             configure_script
             # After configuring, reload the variables
