@@ -27,7 +27,7 @@ Use one of the following one-line commands to download the script to `/root/`, m
 **Using `wget`:**
 ```
 wget -O /root/vps_manager.sh \
-  https://github.com/LivingG0D/virtualizor-bwreset/releases/download/0.2/reset_band.sh && \
+  https://raw.githubusercontent.com/LivingG0D/virtualizor-bwreset/refs/heads/main/reset_band.sh && \
 chmod +x /root/vps_manager.sh && \
 /root/vps_manager.sh
 
@@ -36,7 +36,7 @@ chmod +x /root/vps_manager.sh && \
 **Using `curl`:**
 ```
 curl -L -o /root/vps_manager.sh \
-  https://github.com/LivingG0D/virtualizor-bwreset/releases/download/0.2/reset_band.sh && \
+  https://raw.githubusercontent.com/LivingG0D/virtualizor-bwreset/refs/heads/main/reset_band.sh && \
 chmod +x /root/vps_manager.sh && \
 /root/vps_manager.sh
 
