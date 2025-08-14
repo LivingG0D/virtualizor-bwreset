@@ -1,12 +1,144 @@
+# VPS Bandwidth Carry-Over Manager - Documentation
+#
+# Purpose
+#   Interactive menu-driven Bash script to reset VPS bandwidth usage and optionally
+#   carry over remaining bandwidth by adjusting per-VPS plan limits via the
+#   Virtualizor admin API. Provides manual operations, configuration UI, and
+#   automation via crontab entries.
+#
+# Key Features
+#   - Interactive configuration (whiptail) for Virtualizor host/API credentials.
+#   - Manual reset: reset all VPSes or a specific VPS by ID.
+#   - Automation management: enable/disable daily, monthly, and "last day" cron jobs.
+#   - Robust API interaction with curl and response validation via jq.
+#   - Logging of run output and change summary to /tmp/reset_band.log and
+#     /tmp/reset_band_changes.log.
+#   - Error handling with trap to capture unexpected failures and print context.
+#
+# Usage
+#   Interactive:
+#     sudo /usr/bin/bash reset_band.sh
+#     - Presents a whiptail menu: Configure Script, Manual Reset, Manage Automation.
+#
+#   Cron / Non-interactive:
+#     /usr/bin/bash reset_band.sh --cron
+#     - When run with --cron the script runs the reset logic for all VPSes once,
+#       using stored configuration.
+#
+# Configuration file
+#   Path: /etc/vps_manager.conf
+#   Expected contents (shell variables):
+#     HOST="your.virtualizor.ip.or.hostname"
+#     KEY="admin_api_key"
+#     PASS="admin_api_pass"
+#   The script will create a default file if missing and prompts via whiptail.
+#
+# Dependencies
+#   Required (checked at startup): whiptail, curl, jq
+#   Also used (not explicitly checked): realpath, crontab, nano (for crontab editing)
+#   Ensure these programs exist on the system where the script runs.
+#
+# Important files / variables
+#   CONFIG_FILE   = /etc/vps_manager.conf
+#   LOG_FILE      = /tmp/reset_band.log            # detailed run log
+#   CHANGE_LOG    = /tmp/reset_band_changes.log    # human readable change summary
+#   CRON_TAG      = "# vps-bandwidth-reset-cron"   # marker used to manage cron entries
+#
+# API endpoints used (built from CONFIG_FILE variables)
+#   Base URL:
+#     http://${HOST}:4084/index.php?adminapikey=${KEY}&adminapipass=${PASS}
+#   Common calls:
+#     - List / info:  &act=vs&api=json
+#     - Reset usage:  &act=vs&bwreset=<vpsid>&api=json  (POST)
+#     - Update plan:  &act=managevps&vpsid=<vpsid>&api=json  (POST with editvps=1, bandwidth, plid)
+#
+# Expected API JSON structure (for parsing with jq)
+#   {
+#     "vs": {
+#       "<vpsid>": {
+#         "bandwidth": <number>,        # plan limit in GB, 0 means unlimited
+#         "used_bandwidth": <number>,   # used GB
+#         "plid": <plan_id>,            # plan id to preserve when updating
+#         ...
+#       },
+#       ...
+#     }
+#   }
+#
+# Core behavior (run_reset_logic)
+#   - Mode "all": fetches all VPS entries and loops over each VPS ID.
+#   - Mode "<vpsid>": validates VPS exists in API response and processes only it.
+#   - For each VPS:
+#     1. Read bandwidth (limit) and used_bandwidth from API response.
+#     2. If limit == 0 (unlimited plan):
+#          - Only reset usage via API (bwreset) and do not change plan bandwidth.
+#     3. If limit > 0:
+#          - Calculate new_limit = max(limit - used, 0) to carry over remaining quota.
+#          - Call bwreset to zero usage and then call managevps (editvps) to set
+#            the new bandwidth while preserving plid.
+#     4. Validate each curl call succeeded (exit code) and HTTP code == 200.
+#     5. Validate API JSON responses for expected fields (done, done.done, etc).
+#     6. Append a human-readable line to CHANGE_LOG describing the change.
+#
+# Logging & Error Handling
+#   - All informational and error messages are appended to LOG_FILE.
+#   - The script traps ERR and runs error_handler which logs the exit code, line
+#     number, and optionally prints the last 10 lines of the log for context.
+#   - Interactive UI uses whiptail to show messages for success/failure and to
+#     prompt/confirm destructive operations.
+#
+# Exit codes (not exhaustive; script may return different codes from functions)
+#   0  - Success / no fatal errors
+#   1  - Dependency check failure (missing programs)
+#   2  - API/network/config load failure (e.g., curl failed or empty response)
+#   3  - Response parse error when enumerating all VPS entries
+#   4  - VPS-specific parse error or requested VPS not found
+#   Non-zero (1) may also be returned if run_reset_logic encountered any per-VPS
+#   errors (error_flag gets set).
+#
+# Automation (cron) management
+#   - The automation menu manages crontab entries identified by CRON_TAG to
+#     enable/disable scheduled runs.
+#   - Preset options:
+#       * Daily:   0 0 * * *   -> runs at 00:00
+#       * Monthly: 0 2 1 * *   -> runs 1st of month at 02:00
+#       * Last day workaround:
+#           30 23 * * * [ "$(date +\%d -d tomorrow)" == "01" ] && /usr/bin/bash <script>
+#         -> runs every day at 23:30 and only executes on the last day of month.
+#   - The script uses realpath "$0" to insert the full script path into cron entries.
+#
+# Safety & Notes
+#   - The script will modify VPS plan bandwidth values; use care and verify config.
+#   - Test interactively with a single VPS ID before enabling automation for all.
+#   - Ensure API credentials in /etc/vps_manager.conf have appropriate privileges.
+#   - Because crontab edits and realpath are used, run as a user with expected crontab.
+#   - Log files in /tmp are world-readable by default on many systems; secure them
+#     if they contain sensitive info or rotate/clean them periodically.
+#
+# Typical workflow
+#   1. Run interactively: configure HOST/KEY/PASS via "Configure Script".
+#   2. Choose "Manual Reset" and test "Reset a SPECIFIC VPS" with a test VPS ID.
+#   3. Inspect /tmp/reset_band.log and /tmp/reset_band_changes.log to validate.
+#   4. When satisfied, enable daily/monthly automation via "Manage Automation".
+#
+# Implementation notes
+#   - Uses jq for JSON parsing and curl for HTTP requests; API success is indicated
+#     by JSON fields like "done" and "done.done" depending on endpoint.
+#   - Uses whiptail for TUI dialogs; if running headless, use the --cron flag or
+#     bypass interactive menus and run run_reset_logic directly.
+#
+# Author / Attribution
+#   Script header indicates author: LivingGOD (embedded in UI prompt strings).
+#
+# Example /etc/vps_manager.conf
+#   HOST="192.168.1.100"
+#   KEY="your_api_key_here"
+#   PASS="your_api_pass_here"
+#
+# End of documentation
 
 #!/usr/bin/env bash
 set -euo pipefail
-
-# --- Script Configuration ---
-CONFIG_FILE="/etc/vps_manager.conf"
-CRON_TAG="# vps-bandwidth-reset-cron"
-LOG_FILE="/tmp/reset_band.log"
-CHANGE_LOG="/tmp/reset_band_changes.log"
 
 # Trap for error reporting and cleanup
 error_handler() {
@@ -30,6 +162,13 @@ trap error_handler ERR
 #   Virtualizor bandwidth carry-over process.
 #
 #================================================================
+
+
+# --- Script Configuration ---
+CONFIG_FILE="/etc/vps_manager.conf"
+CRON_TAG="# vps-bandwidth-reset-cron"
+LOG_FILE="/tmp/reset_band.log"
+CHANGE_LOG="/tmp/reset_band_changes.log"
 
 # --- Dependency Check ---
 for dep in whiptail curl jq; do
@@ -94,11 +233,9 @@ run_reset_logic() {
         local api_base="http://${HOST}:4084/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
 
         log_info "Fetching server data..."
-        log_info "API URL: ${api_base}&act=vs&api=json"
         local vs_json
         vs_json=$(curl -sS "${api_base}&act=vs&api=json")
         local curl_status=$?
-        log_info "Curl exit status: $curl_status"
         log_info "API response: $vs_json"
         if (( curl_status != 0 )); then
             log_error "API request failed (curl exit $curl_status). Check network and API credentials."
@@ -108,13 +245,6 @@ run_reset_logic() {
         if [[ -z "$vs_json" ]]; then
             log_error "API returned empty response. Check API endpoint and credentials."
             whiptail --title "API Error" --msgbox "API returned empty response. Check API endpoint and credentials." 10 78
-            return 2
-        fi
-        
-        # Validate JSON format
-        if ! echo "$vs_json" | jq empty 2>/dev/null; then
-            log_error "API response is not valid JSON. Response: $vs_json"
-            whiptail --title "API Error" --msgbox "API response is not valid JSON. Check API endpoint and credentials." 10 78
             return 2
         fi
 
@@ -130,58 +260,16 @@ run_reset_logic() {
             # Check if there are any VPS entries
             local vps_count
             vps_count=$(echo "$vs_json" | jq -r '.vs | length')
-            log_info "VPS count in response: $vps_count"
             if [[ "$vps_count" -eq 0 ]]; then
                 log_info "No VPS entries found in API response."
             else
                 log_info "Found $vps_count VPS entries in API response."
             fi
             
-            # Try to parse VPS IDs
-            local vps_keys
-            vps_keys=$(echo "$vs_json" | jq -r '.vs | keys_unsorted[]' 2>/dev/null)
-            local jq_status=$?
-            
-            if [[ $jq_status -ne 0 ]] || [[ -z "$vps_keys" ]]; then
-                log_error "Failed to parse VPS IDs from API response. jq exit status: $jq_status"
-                log_info "Attempting alternative parsing method..."
-                
-                # Alternative method to extract VPS IDs
-                local vps_ids_alt
-                vps_ids_alt=$(echo "$vs_json" | jq -r '.vs | to_entries[] | .key' 2>/dev/null)
-                local jq_status_alt=$?
-                
-                if [[ $jq_status_alt -eq 0 ]] && [[ -n "$vps_ids_alt" ]]; then
-                    log_info "Alternative parsing successful"
-                    mapfile -t vps_ids <<< "$vps_ids_alt"
-                else
-                    log_error "Alternative parsing also failed. jq exit status: $jq_status_alt"
-                    log_info "Attempting to parse as array if it's not an object..."
-                    
-                    # Try parsing as array if it's not an object
-                    local vps_array_check
-                    vps_array_check=$(echo "$vs_json" | jq -e '.vs | type == "array"' 2>/dev/null)
-                    if [[ "$vps_array_check" == "true" ]]; then
-                        log_info "VPS data is an array. Parsing as array..."
-                        local vps_ids_array
-                        vps_ids_array=$(echo "$vs_json" | jq -r '.vs[].vpsid' 2>/dev/null)
-                        local jq_status_array=$?
-                        
-                        if [[ $jq_status_array -eq 0 ]] && [[ -n "$vps_ids_array" ]]; then
-                            log_info "Array parsing successful"
-                            mapfile -t vps_ids <<< "$vps_ids_array"
-                        else
-                            log_error "Array parsing failed. jq exit status: $jq_status_array"
-                            whiptail --title "Parse Error" --msgbox "Failed to parse VPS IDs from API response." 10 78
-                            return 3
-                        fi
-                    else
-                        whiptail --title "Parse Error" --msgbox "Failed to parse VPS IDs from API response." 10 78
-                        return 3
-                    fi
-                fi
-            else
-                mapfile -t vps_ids <<< "$vps_keys"
+            if ! mapfile -t vps_ids < <(echo "$vs_json" | jq -r '.vs | keys_unsorted[]' 2>/dev/null); then
+                log_error "Failed to parse VPS IDs from API response."
+                whiptail --title "Parse Error" --msgbox "Failed to parse VPS IDs from API response." 10 78
+                return 3
             fi
         else
             # Check if the response has the expected structure for specific VPS
@@ -199,7 +287,6 @@ run_reset_logic() {
             vps_ids=("$mode")
         fi
         log_info "Target VPS IDs: ${vps_ids[*]}"
-        log_info "Number of target VPS IDs: ${#vps_ids[@]}"
 
         if [ ${#vps_ids[@]} -eq 0 ]; then
             log_info "No target VPSs found. Exiting."
