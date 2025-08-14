@@ -2,6 +2,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --- Script Configuration ---
+CONFIG_FILE="/etc/vps_manager.conf"
+CRON_TAG="# vps-bandwidth-reset-cron"
+LOG_FILE="/tmp/reset_band.log"
+CHANGE_LOG="/tmp/reset_band_changes.log"
+
 # Trap for error reporting and cleanup
 error_handler() {
     local exit_code=$?
@@ -24,13 +30,6 @@ trap error_handler ERR
 #   Virtualizor bandwidth carry-over process.
 #
 #================================================================
-
-
-# --- Script Configuration ---
-CONFIG_FILE="/etc/vps_manager.conf"
-CRON_TAG="# vps-bandwidth-reset-cron"
-LOG_FILE="/tmp/reset_band.log"
-CHANGE_LOG="/tmp/reset_band_changes.log"
 
 # --- Dependency Check ---
 for dep in whiptail curl jq; do
@@ -95,23 +94,103 @@ run_reset_logic() {
         local api_base="http://${HOST}:4084/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
 
         log_info "Fetching server data..."
+        log_info "API URL: ${api_base}&act=vs&api=json"
         local vs_json
         vs_json=$(curl -sS "${api_base}&act=vs&api=json")
         local curl_status=$?
-        if (( curl_status != 0 )) || [[ -z "$vs_json" ]]; then
-            log_error "API request failed (curl exit $curl_status, empty response). Check network and API credentials."
+        log_info "Curl exit status: $curl_status"
+        log_info "API response: $vs_json"
+        if (( curl_status != 0 )); then
+            log_error "API request failed (curl exit $curl_status). Check network and API credentials."
             whiptail --title "API Error" --msgbox "Failed to fetch server data. Check network and API credentials." 10 78
+            return 2
+        fi
+        if [[ -z "$vs_json" ]]; then
+            log_error "API returned empty response. Check API endpoint and credentials."
+            whiptail --title "API Error" --msgbox "API returned empty response. Check API endpoint and credentials." 10 78
+            return 2
+        fi
+        
+        # Validate JSON format
+        if ! echo "$vs_json" | jq empty 2>/dev/null; then
+            log_error "API response is not valid JSON. Response: $vs_json"
+            whiptail --title "API Error" --msgbox "API response is not valid JSON. Check API endpoint and credentials." 10 78
             return 2
         fi
 
         local vps_ids=()
         if [[ "$mode" == "all" ]]; then
-            if ! mapfile -t vps_ids < <(echo "$vs_json" | jq -r '.vs | keys_unsorted[]'); then
-                log_error "Failed to parse VPS IDs from API response."
-                whiptail --title "Parse Error" --msgbox "Failed to parse VPS IDs from API response." 10 78
+            # Check if the response has the expected structure
+            if ! echo "$vs_json" | jq -e '.vs' >/dev/null 2>&1; then
+                log_error "API response missing 'vs' field. Response: $vs_json"
+                whiptail --title "Parse Error" --msgbox "API response missing 'vs' field. Check API endpoint and credentials." 10 78
                 return 3
             fi
+            
+            # Check if there are any VPS entries
+            local vps_count
+            vps_count=$(echo "$vs_json" | jq -r '.vs | length')
+            log_info "VPS count in response: $vps_count"
+            if [[ "$vps_count" -eq 0 ]]; then
+                log_info "No VPS entries found in API response."
+            else
+                log_info "Found $vps_count VPS entries in API response."
+            fi
+            
+            # Try to parse VPS IDs
+            local vps_keys
+            vps_keys=$(echo "$vs_json" | jq -r '.vs | keys_unsorted[]' 2>/dev/null)
+            local jq_status=$?
+            
+            if [[ $jq_status -ne 0 ]] || [[ -z "$vps_keys" ]]; then
+                log_error "Failed to parse VPS IDs from API response. jq exit status: $jq_status"
+                log_info "Attempting alternative parsing method..."
+                
+                # Alternative method to extract VPS IDs
+                local vps_ids_alt
+                vps_ids_alt=$(echo "$vs_json" | jq -r '.vs | to_entries[] | .key' 2>/dev/null)
+                local jq_status_alt=$?
+                
+                if [[ $jq_status_alt -eq 0 ]] && [[ -n "$vps_ids_alt" ]]; then
+                    log_info "Alternative parsing successful"
+                    mapfile -t vps_ids <<< "$vps_ids_alt"
+                else
+                    log_error "Alternative parsing also failed. jq exit status: $jq_status_alt"
+                    log_info "Attempting to parse as array if it's not an object..."
+                    
+                    # Try parsing as array if it's not an object
+                    local vps_array_check
+                    vps_array_check=$(echo "$vs_json" | jq -e '.vs | type == "array"' 2>/dev/null)
+                    if [[ "$vps_array_check" == "true" ]]; then
+                        log_info "VPS data is an array. Parsing as array..."
+                        local vps_ids_array
+                        vps_ids_array=$(echo "$vs_json" | jq -r '.vs[].vpsid' 2>/dev/null)
+                        local jq_status_array=$?
+                        
+                        if [[ $jq_status_array -eq 0 ]] && [[ -n "$vps_ids_array" ]]; then
+                            log_info "Array parsing successful"
+                            mapfile -t vps_ids <<< "$vps_ids_array"
+                        else
+                            log_error "Array parsing failed. jq exit status: $jq_status_array"
+                            whiptail --title "Parse Error" --msgbox "Failed to parse VPS IDs from API response." 10 78
+                            return 3
+                        fi
+                    else
+                        whiptail --title "Parse Error" --msgbox "Failed to parse VPS IDs from API response." 10 78
+                        return 3
+                    fi
+                fi
+            else
+                mapfile -t vps_ids <<< "$vps_keys"
+            fi
         else
+            # Check if the response has the expected structure for specific VPS
+            if ! echo "$vs_json" | jq -e '.vs' >/dev/null 2>&1; then
+                log_error "API response missing 'vs' field. Response: $vs_json"
+                whiptail --title "Parse Error" --msgbox "API response missing 'vs' field. Check API endpoint and credentials." 10 78
+                return 4
+            fi
+            
             if ! echo "$vs_json" | jq -e --arg vpsid "$mode" '.vs[$vpsid]' > /dev/null; then
                 log_error "VPS ID $mode not found in API response."
                 whiptail --title "VPS Not Found" --msgbox "VPS ID $mode not found in API response." 10 78
@@ -120,6 +199,7 @@ run_reset_logic() {
             vps_ids=("$mode")
         fi
         log_info "Target VPS IDs: ${vps_ids[*]}"
+        log_info "Number of target VPS IDs: ${#vps_ids[@]}"
 
         if [ ${#vps_ids[@]} -eq 0 ]; then
             log_info "No target VPSs found. Exiting."
@@ -144,13 +224,29 @@ run_reset_logic() {
                 log_info "$vpsid → unlimited plan. Resetting usage only."
                 local reset
                 reset=$(curl -sS -X POST -w '\nHTTP_CODE:%{http_code}' "${api_base}&act=vs&bwreset=${vpsid}&api=json")
+                local curl_reset_status=$?
+                if (( curl_reset_status != 0 )); then
+                    log_error "$vpsid → curl failed with exit code $curl_reset_status"
+                    whiptail --title "Reset Error" --msgbox "$vpsid → curl failed with exit code $curl_reset_status" 10 78
+                    continue
+                fi
                 local r_body=${reset%$'\n'HTTP_CODE:*}; local r_code=${reset##*HTTP_CODE:}
-                if [[ "$r_code" != "200" || $(jq -r '.done //0' <<<"$r_body") -ne 1 ]]; then
+                if [[ "$r_code" != "200" ]]; then
                     log_error "$vpsid → usage reset failed (HTTP $r_code) body: $r_body"
                     whiptail --title "Reset Error" --msgbox "$vpsid → usage reset failed (HTTP $r_code)" 10 78
-                else
-                    log_info "$vpsid → usage reset OK"
+                    continue
                 fi
+                if ! echo "$r_body" | jq -e '.done //0' >/dev/null 2>&1; then
+                    log_error "$vpsid → API response missing 'done' field. Response: $r_body"
+                    whiptail --title "Reset Error" --msgbox "$vpsid → API response format error" 10 78
+                    continue
+                fi
+                if [[ $(echo "$r_body" | jq -r '.done //0') -ne 1 ]]; then
+                    log_error "$vpsid → usage reset failed (done != 1) body: $r_body"
+                    whiptail --title "Reset Error" --msgbox "$vpsid → usage reset failed (done != 1)" 10 78
+                    continue
+                fi
+                log_info "$vpsid → usage reset OK"
                 continue
             fi
 
@@ -171,20 +267,57 @@ run_reset_logic() {
 
             local reset
             reset=$(curl -sS -X POST -w '\nHTTP_CODE:%{http_code}' "${api_base}&act=vs&bwreset=${vpsid}&api=json")
+            local curl_reset_status=$?
+            if (( curl_reset_status != 0 )); then
+                log_error "$vpsid → curl failed with exit code $curl_reset_status"
+                whiptail --title "Reset Error" --msgbox "$vpsid → curl failed with exit code $curl_reset_status" 10 78
+                continue
+            fi
             local r_body=${reset%$'\n'HTTP_CODE:*}; local r_code=${reset##*HTTP_CODE:}
-            if [[ "$r_code" != "200" || $(jq -r '.done //0' <<<"$r_body") -ne 1 ]]; then
+            if [[ "$r_code" != "200" ]]; then
                 log_error "$vpsid → reset failed (HTTP $r_code) body: $r_body"
                 whiptail --title "Reset Error" --msgbox "$vpsid → reset failed (HTTP $r_code)" 10 78
+                continue
+            fi
+            if ! echo "$r_body" | jq -e '.done //0' >/dev/null 2>&1; then
+                log_error "$vpsid → API response missing 'done' field. Response: $r_body"
+                whiptail --title "Reset Error" --msgbox "$vpsid → API response format error" 10 78
+                continue
+            fi
+            if [[ $(echo "$r_body" | jq -r '.done //0') -ne 1 ]]; then
+                log_error "$vpsid → reset failed (done != 1) body: $r_body"
+                whiptail --title "Reset Error" --msgbox "$vpsid → reset failed (done != 1)" 10 78
                 continue
             fi
             log_info "Usage reset OK"
 
             local update
             update=$(curl -sS -w '\nHTTP_CODE:%{http_code}' -d "editvps=1" -d "bandwidth=$new_limit" -d "plid=${plid}" "${api_base}&act=managevps&vpsid=${vpsid}&api=json")
+            local curl_update_status=$?
+            if (( curl_update_status != 0 )); then
+                log_error "$vpsid → update curl failed with exit code $curl_update_status"
+                whiptail --title "Update Error" --msgbox "$vpsid → update curl failed with exit code $curl_update_status" 10 78
+                continue
+            fi
             local u_body=${update%$'\n'HTTP_CODE:*}; local u_code=${update##*HTTP_CODE:}
-            if [[ "$u_code" != "200" || $(jq -r '.done.done //false' <<<"$u_body") != true ]]; then
+            if [[ "$u_code" != "200" ]]; then
                 log_error "$vpsid → update failed (HTTP $u_code) body: $u_body"
                 whiptail --title "Update Error" --msgbox "$vpsid → update failed (HTTP $u_code)" 10 78
+                continue
+            fi
+            if ! echo "$u_body" | jq -e '.done' >/dev/null 2>&1; then
+                log_error "$vpsid → update API response missing 'done' field. Response: $u_body"
+                whiptail --title "Update Error" --msgbox "$vpsid → update API response format error" 10 78
+                continue
+            fi
+            if ! echo "$u_body" | jq -e '.done.done' >/dev/null 2>&1; then
+                log_error "$vpsid → update API response missing 'done.done' field. Response: $u_body"
+                whiptail --title "Update Error" --msgbox "$vpsid → update API response format error" 10 78
+                continue
+            fi
+            if [[ $(echo "$u_body" | jq -r '.done.done //false') != true ]]; then
+                log_error "$vpsid → update failed (done.done != true) body: $u_body"
+                whiptail --title "Update Error" --msgbox "$vpsid → update failed (done.done != true)" 10 78
                 continue
             fi
             log_info "Limit updated (plan $plid preserved)"
@@ -308,7 +441,6 @@ load_config
 
 # Main interactive menu loop
 while true; do
-    local choice
     choice=$(whiptail --title "VPS Bandwidth Manager by LivingGOD" --menu "Select an option" 16 60 4 \
         "1" "Configure Script" \
         "2" "Manual Reset" \
@@ -336,3 +468,4 @@ while true; do
             ;;
     esac
 done
+
