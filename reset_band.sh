@@ -781,18 +781,18 @@ if [[ "${1:-}" == "--list-vps" ]]; then
                 if ls "${DIAG_DIR}/reset_band_page_candidate_${start_page}_*.json" >/dev/null 2>&1; then
                     candidate_json=$(jq -s 'map(.vs) | add | {vs: .}' ${DIAG_DIR}/reset_band_page_candidate_${start_page}_*.json 2>/dev/null || echo '{}')
                     candidate_count=$(echo "$candidate_json" | jq -r '.vs | length' 2>/dev/null || echo 0)
+                    echo "Candidate start=${start_page}: merged ${candidate_count} total VPS entries"
                 else
                     candidate_json='{}'
                     candidate_count=0
+                    echo "Candidate start=${start_page}: no pages saved, count=0"
                 fi
-
-                echo "  candidate start=${start_page}: total after merge = $candidate_count entries"
 
                 # If candidate is better, keep it
                 if [[ $candidate_count -gt $best_count ]]; then
                     best_count=$candidate_count
                     best_json="$candidate_json"
-                    echo "    -> new best candidate: start=${start_page} with $best_count entries"
+                    echo "New best candidate: start=${start_page} with ${candidate_count} entries"
                 fi
 
                 # Clean up candidate temp pages
