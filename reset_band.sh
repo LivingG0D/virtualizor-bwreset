@@ -25,6 +25,14 @@
 #     - When run with --cron the script runs the reset logic for all VPSes once,
 #       using stored configuration.
 #
+#   Diagnostic commands:
+#     /usr/bin/bash reset_band.sh --list-vps
+#     - Lists all VPS IDs in the system (useful for finding valid VPS IDs)
+#     /usr/bin/bash reset_band.sh --list-vps-preview  
+#     - Shows first 20 VPS IDs for quick preview
+#     /usr/bin/bash reset_band.sh --check-vps <VPS_ID>
+#     - Checks if a specific VPS ID exists and shows its status
+#
 # Configuration file
 #   Path: /etc/vps_manager.conf
 #   Expected contents (shell variables):
@@ -716,10 +724,10 @@ if [[ "${1:-}" == "--cron" ]]; then
     exit 0
 fi
 
-# List available VPS IDs: non-interactive command to show first 20 VPS IDs
+# List available VPS IDs: non-interactive command to show all VPS IDs
 if [[ "${1:-}" == "--list-vps" ]]; then
     load_config
-    echo "Listing available VPS IDs..."
+    echo "Listing all available VPS IDs..."
     # Build api_base same as run_reset_logic
     host_clean="${HOST#http://}"
     host_clean="${host_clean#https://}"
@@ -734,22 +742,94 @@ if [[ "${1:-}" == "--list-vps" ]]; then
         fi
     fi
     
-    # Get first page of VPSes
-    api_url="${api_base}&act=vs&api=json&reslen=20&page=0"
+    # Get all VPS IDs using pagination like the main script
+    api_url="${api_base}&act=vs&api=json&reslen=0"
     vs_json=$(curl -sS -L --max-redirs 5 "$api_url" 2>/dev/null || echo '{}')
     
     if echo "$vs_json" | jq -e '.vs' >/dev/null 2>&1; then
-        echo "First 20 VPS IDs in your system:"
-        echo "$vs_json" | jq -r '.vs | keys[]' | head -20 | while read -r vpsid; do
+        vps_count=$(echo "$vs_json" | jq -r '.vs | length')
+        
+        # If we got a small result (likely truncated), use paging to get all VPSes
+        if [[ "$vps_count" -le 50 ]]; then
+            echo "Fetching all VPS IDs using pagination..."
+            # Clean up any previous temp pages
+            rm -f "${DIAG_DIR}/list_vps_page_*.json" 2>/dev/null || true
+            per=50
+            page=0
+            while true; do
+                page_url="${api_base}&act=vs&api=json&reslen=${per}&page=${page}"
+                curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/list_vps_page_${page}.json" "$page_url" 2>/dev/null
+                if ! jq -e '.vs' "${DIAG_DIR}/list_vps_page_${page}.json" >/dev/null 2>&1; then
+                    break
+                fi
+                page_count=$(jq -r '.vs | length' "${DIAG_DIR}/list_vps_page_${page}.json" 2>/dev/null || echo 0)
+                if [[ "$page_count" -eq 0 ]]; then
+                    break
+                fi
+                page=$((page+1))
+            done
+            # Merge pages into one JSON object
+            if ls "${DIAG_DIR}/list_vps_page_*.json" >/dev/null 2>&1; then
+                vs_json=$(jq -s 'map(.vs) | add | {vs: .}' ${DIAG_DIR}/list_vps_page_*.json 2>/dev/null || echo '{}')
+                # Clean temp pages
+                rm -f "${DIAG_DIR}/list_vps_page_*.json" 2>/dev/null || true
+                vps_count=$(echo "$vs_json" | jq -r '.vs | length' 2>/dev/null || echo 0)
+            fi
+        fi
+        
+        echo "All $vps_count VPS IDs in your system:"
+        echo "$vs_json" | jq -r '.vs | keys[]' | sort -n | while read -r vpsid; do
             vps_name=$(echo "$vs_json" | jq -r --arg vpsid "$vpsid" '.vs[$vpsid].vps_name // "unknown"')
             hostname=$(echo "$vs_json" | jq -r --arg vpsid "$vpsid" '.vs[$vpsid].hostname // "unknown"')
             echo "  VPS $vpsid: $vps_name ($hostname)"
         done
         echo ""
+        echo "Total: $vps_count VPS IDs listed."
         echo "Use any of these VPS IDs to test the bandwidth reset script."
         echo "Example: /root/vps_manager.sh --check-vps <VPS_ID>"
     else
         echo "Failed to fetch VPS list. Check API configuration."
+        exit 2
+    fi
+    exit 0
+fi
+
+# List first 20 VPS IDs for quick preview - useful for quick VPS discovery
+if [[ "${1:-}" == "--list-vps-preview" ]]; then
+    load_config
+    echo "Fetching VPS list preview (first 20 VPS IDs)..."
+    # Build api_base same as run_reset_logic
+    host_clean="${HOST#http://}"
+    host_clean="${host_clean#https://}"
+    api_base="https://${host_clean}:4085/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
+    
+    # Fetch only the first page with 20 VPS entries
+    api_url="${api_base}&act=vs&api=json&reslen=20&page=1"
+    response=$(curl -s -k "$api_url" 2>/dev/null)
+    
+    if [[ -n "$response" ]] && echo "$response" | jq -e '.vs' &>/dev/null; then
+        vs_json="$response"
+        vps_ids=($(echo "$vs_json" | jq -r '.vs | keys[]' | sort -n))
+        vps_count=${#vps_ids[@]}
+        
+        if [[ $vps_count -eq 0 ]]; then
+            echo "No VPS IDs found in the first 20 results."
+            exit 0
+        fi
+        
+        echo "Preview: First $vps_count VPS IDs found:"
+        echo ""
+        for vpsid in "${vps_ids[@]}"; do
+            vps_name=$(echo "$vs_json" | jq -r --arg vpsid "$vpsid" '.vs[$vpsid].vps_name // "unknown"')
+            hostname=$(echo "$vs_json" | jq -r --arg vpsid "$vpsid" '.vs[$vpsid].hostname // "unknown"')
+            echo "  VPS $vpsid: $vps_name ($hostname)"
+        done
+        echo ""
+        echo "This is a preview of the first 20 VPS IDs."
+        echo "Use --list-vps to see all VPS IDs in your system."
+        echo "Example: /root/vps_manager.sh --check-vps <VPS_ID>"
+    else
+        echo "Failed to fetch VPS list preview. Check API configuration."
         exit 2
     fi
     exit 0
