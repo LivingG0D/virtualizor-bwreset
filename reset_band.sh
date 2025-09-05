@@ -382,9 +382,51 @@ run_reset_logic() {
             fi
             
             if ! echo "$vs_json" | jq -e --arg vpsid "$mode" '.vs[$vpsid]' > /dev/null; then
-                log_error "VPS ID $mode not found in API response."
-                whiptail --title "VPS Not Found" --msgbox "VPS ID $mode not found in API response." 10 78
-                return 4
+                # VPS not found in initial response, try paging if needed
+                vps_count=$(echo "$vs_json" | jq -r '.vs | length')
+                if [[ "$vps_count" -le 50 ]]; then
+                    log_info "VPS $mode not in initial response; attempting paged requests to find it."
+                    # Clean up any previous temp pages
+                    rm -f "${DIAG_DIR}/reset_band_page_*.json" 2>/dev/null || true
+                    local per=50
+                    local page=0
+                    while true; do
+                        local page_url="${api_base}&act=vs&api=json&reslen=${per}&page=${page}"
+                        log_info "Fetching page $page for VPS $mode"
+                        if (( diagnose_mode == 1 )); then
+                            curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/reset_band_page_${page}.json" "$page_url" || true
+                        else
+                            curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/reset_band_page_${page}.json" "$page_url"
+                        fi
+                        # Validate page
+                        if ! jq -e '.vs' "${DIAG_DIR}/reset_band_page_${page}.json" >/dev/null 2>&1; then
+                            log_info "Page $page did not contain 'vs' field; stopping pagination."
+                            break
+                        fi
+                        local page_count
+                        page_count=$(jq -r '.vs | length' "${DIAG_DIR}/reset_band_page_${page}.json")
+                        log_info "Page $page contains $page_count entries."
+                        # If no entries, stop
+                        if [[ "$page_count" -eq 0 ]]; then
+                            break
+                        fi
+                        page=$((page+1))
+                    done
+                    # Merge pages into one JSON object
+                    if ls "${DIAG_DIR}/reset_band_page_*.json" >/dev/null 2>&1; then
+                        vs_json=$(jq -s 'map(.vs) | add | {vs: .}' ${DIAG_DIR}/reset_band_page_*.json 2>/dev/null || echo '{}')
+                        # Clean temp pages
+                        rm -f "${DIAG_DIR}/reset_band_page_*.json" 2>/dev/null || true
+                        vps_count=$(echo "$vs_json" | jq -r '.vs | length' 2>/dev/null || echo 0)
+                        log_info "After paging, total VPS entries: $vps_count"
+                    fi
+                fi
+                # Check again after paging
+                if ! echo "$vs_json" | jq -e --arg vpsid "$mode" '.vs[$vpsid]' > /dev/null; then
+                    log_error "VPS ID $mode not found in API response."
+                    whiptail --title "VPS Not Found" --msgbox "VPS ID $mode not found in API response." 10 78
+                    return 4
+                fi
             fi
             vps_ids=("$mode")
         fi
