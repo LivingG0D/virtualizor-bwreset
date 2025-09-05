@@ -363,7 +363,7 @@ run_reset_logic() {
                 done
                 # Merge pages into one JSON object
                 if ls "${DIAG_DIR}/reset_band_page_*.json" >/dev/null 2>&1; then
-                    vs_json=$(jq -s 'map(.vs) | add | {vs: .}' ${DIAG_DIR}/reset_band_page_*.json 2>/dev/null || echo '{}')
+                    vs_json=$(jq -s 'map(.vs | if type=="array" then {} else . end) | add | {vs: .}' ${DIAG_DIR}/reset_band_page_*.json 2>/dev/null || echo '{}')
                     # Clean temp pages
                     rm -f "${DIAG_DIR}/reset_band_page_*.json" 2>/dev/null || true
                     vps_count=$(echo "$vs_json" | jq -r '.vs | length' 2>/dev/null || echo 0)
@@ -423,7 +423,7 @@ run_reset_logic() {
                     done
                     # Merge pages into one JSON object
                     if ls "${DIAG_DIR}/reset_band_page_*.json" >/dev/null 2>&1; then
-                        vs_json=$(jq -s 'map(.vs) | add | {vs: .}' ${DIAG_DIR}/reset_band_page_*.json 2>/dev/null || echo '{}')
+                        vs_json=$(jq -s 'map(.vs | if type=="array" then {} else . end) | add | {vs: .}' ${DIAG_DIR}/reset_band_page_*.json 2>/dev/null || echo '{}')
                         # Clean temp pages
                         rm -f "${DIAG_DIR}/reset_band_page_*.json" 2>/dev/null || true
                         vps_count=$(echo "$vs_json" | jq -r '.vs | length' 2>/dev/null || echo 0)
@@ -791,7 +791,7 @@ if [[ "${1:-}" == "--list-vps" ]]; then
                     done
 
                     # Try to merge all pages at once. Capture jq exit status so set -e doesn't abort.
-                    candidate_json=$(jq -s 'map(.vs) | add | {vs: .}' "${candidate_files[@]}" 2>"${DIAG_DIR}/reset_band_jq_error.log" ) || true
+                    candidate_json=$(jq -s 'map(.vs | if type=="array" then {} else . end) | add | {vs: .}' "${candidate_files[@]}" 2>"${DIAG_DIR}/reset_band_jq_error.log" ) || true
                     jq_exit=$?
                     if [[ $jq_exit -ne 0 || -z "$candidate_json" ]]; then
                         echo "  jq -s failed (exit=$jq_exit). Inspecting ${DIAG_DIR}/reset_band_jq_error.log"
@@ -803,7 +803,7 @@ if [[ "${1:-}" == "--list-vps" ]]; then
                         # Fallback: merge incrementally to tolerate partial/broken files
                         combined='{}'
                         for cf in "${candidate_files[@]}"; do
-                            part=$(jq -r '.vs' "${cf}" 2>/dev/null || echo '{}')
+                            part=$(jq -r '.vs | if type=="array" then {} else . end' "${cf}" 2>/dev/null || echo '{}')
                             # merge into combined
                             combined=$(jq -n --argjson a "$combined" --argjson b "$part" '$a + $b' 2>/dev/null || echo '{}')
                         done
