@@ -583,6 +583,43 @@ if [[ "${1:-}" == "--cron" ]]; then
     exit 0
 fi
 
+# Quick check for a single VPS ID: non-interactive diagnostic that queries the API for one vpsid
+if [[ "${1:-}" == "--check-vps" && -n "${2:-}" ]]; then
+    load_config
+    vps_to_check="$2"
+    echo "Checking VPS ID $vps_to_check against configured API..."
+    # Build api_base same as run_reset_logic
+    host_clean="${HOST#http://}"
+    host_clean="${host_clean#https://}"
+    host_clean="${host_clean%%/}"
+    if [[ -n "${API_BASE:-}" ]]; then
+        api_base="$API_BASE"
+        echo "Using API_BASE override from config."
+    else
+        if [[ "$host_clean" == *:* ]]; then
+            api_base="https://${host_clean}/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
+        else
+            api_base="https://${host_clean}:4085/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
+        fi
+    fi
+    api_url="${api_base}&act=vs&vpsid=${vps_to_check}&api=json"
+    echo "API URL: $api_url"
+    # Save body and headers
+    curl -sS -D /tmp/reset_band_check_vps_headers.log -o /tmp/reset_band_check_vps_body.log --max-redirs 5 -L "$api_url" || true
+    echo "Saved response to /tmp/reset_band_check_vps_body.log and headers to /tmp/reset_band_check_vps_headers.log"
+    if grep -qi '<html\|<script' /tmp/reset_band_check_vps_body.log 2>/dev/null; then
+        echo "Response appears to be HTML (redirect/proxy). Check scheme/port and API_BASE." >&2
+        exit 2
+    fi
+    if jq -e '.vs["'"${vps_to_check}"'" ]' /tmp/reset_band_check_vps_body.log >/dev/null 2>&1; then
+        echo "VPS ID $vps_to_check FOUND in API response."; cat /tmp/reset_band_check_vps_body.log
+        exit 0
+    else
+        echo "VPS ID $vps_to_check NOT found in API response."; cat /tmp/reset_band_check_vps_body.log
+        exit 4
+    fi
+fi
+
 # Support a diagnostic, non-interactive mode to capture curl verbose output
 if [[ "${1:-}" == "--diagnose" ]]; then
     load_config
