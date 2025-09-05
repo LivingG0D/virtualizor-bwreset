@@ -28,9 +28,10 @@
 # Configuration file
 #   Path: /etc/vps_manager.conf
 #   Expected contents (shell variables):
-#     HOST="your.virtualizor.ip.or.hostname"
+#     HOST="your.virtualizor.master.ip.or.hostname"
 #     KEY="admin_api_key"
 #     PASS="admin_api_pass"
+#   Note: HOST should be the master server IP/hostname, and the API calls use port 4085.
 #   The script will create a default file if missing and prompts via whiptail.
 #
 # Dependencies
@@ -46,7 +47,7 @@
 #
 # API endpoints used (built from CONFIG_FILE variables)
 #   Base URL:
-#     http://${HOST}:4084/index.php?adminapikey=${KEY}&adminapipass=${PASS}
+#     http://${HOST}:4085/index.php?adminapikey=${KEY}&adminapipass=${PASS}
 #   Common calls:
 #     - List / info:  &act=vs&api=json
 #     - Reset usage:  &act=vs&bwreset=<vpsid>&api=json  (POST)
@@ -131,7 +132,7 @@
 #   Script header indicates author: LivingGOD (embedded in UI prompt strings).
 #
 # Example /etc/vps_manager.conf
-#   HOST="192.168.1.100"
+#   HOST="192.168.1.100"  # Master server IP
 #   KEY="your_api_key_here"
 #   PASS="your_api_pass_here"
 #
@@ -230,7 +231,7 @@ run_reset_logic() {
         log_info()  { echo "$(date '+%F %T') [INFO]  $*"  | tee -a "$LOG_FILE"; }
         log_error() { echo "$(date '+%F %T') [ERROR] $*" | tee -a "$LOG_FILE" >&2; error_flag=1; }
 
-        local api_base="http://${HOST}:4084/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
+        local api_base="http://${HOST}:4085/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
 
         log_info "Fetching server data..."
         local api_url="${api_base}&act=vs&api=json"
