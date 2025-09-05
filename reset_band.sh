@@ -381,6 +381,7 @@ run_reset_logic() {
                 return 4
             fi
             
+            # Added paging for specific VPS mode to handle VPSes beyond the first 50
             if ! echo "$vs_json" | jq -e --arg vpsid "$mode" '.vs[$vpsid]' > /dev/null; then
                 # VPS not found in initial response, try paging if needed
                 vps_count=$(echo "$vs_json" | jq -r '.vs | length')
