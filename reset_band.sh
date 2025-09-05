@@ -233,8 +233,10 @@ run_reset_logic() {
         local api_base="http://${HOST}:4084/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
 
         log_info "Fetching server data..."
+        local api_url="${api_base}&act=vs&api=json"
+        log_info "API URL: $api_url"
         local vs_json
-        vs_json=$(curl -sS "${api_base}&act=vs&api=json")
+        vs_json=$(curl -sS "$api_url")
         local curl_status=$?
         log_info "API response: $vs_json"
         if (( curl_status != 0 )); then
@@ -252,8 +254,13 @@ run_reset_logic() {
         if [[ "$mode" == "all" ]]; then
             # Check if the response has the expected structure
             if ! echo "$vs_json" | jq -e '.vs' >/dev/null 2>&1; then
-                log_error "API response missing 'vs' field. Response: $vs_json"
-                whiptail --title "Parse Error" --msgbox "API response missing 'vs' field. Check API endpoint and credentials." 10 78
+                if echo "$vs_json" | jq -e '.1' >/dev/null 2>&1; then
+                    log_error "API response appears to be for servers, not VPSes. Ensure HOST is set to the master server IP. Response: $vs_json"
+                    whiptail --title "API Error" --msgbox "API response is for servers, not VPSes. Check that HOST is the master server IP." 10 78
+                else
+                    log_error "API response missing 'vs' field. Response: $vs_json"
+                    whiptail --title "Parse Error" --msgbox "API response missing 'vs' field. Check API endpoint and credentials." 10 78
+                fi
                 return 3
             fi
             
@@ -274,8 +281,13 @@ run_reset_logic() {
         else
             # Check if the response has the expected structure for specific VPS
             if ! echo "$vs_json" | jq -e '.vs' >/dev/null 2>&1; then
-                log_error "API response missing 'vs' field. Response: $vs_json"
-                whiptail --title "Parse Error" --msgbox "API response missing 'vs' field. Check API endpoint and credentials." 10 78
+                if echo "$vs_json" | jq -e '.1' >/dev/null 2>&1; then
+                    log_error "API response appears to be for servers, not VPSes. Ensure HOST is set to the master server IP. Response: $vs_json"
+                    whiptail --title "API Error" --msgbox "API response is for servers, not VPSes. Check that HOST is the master server IP." 10 78
+                else
+                    log_error "API response missing 'vs' field. Response: $vs_json"
+                    whiptail --title "Parse Error" --msgbox "API response missing 'vs' field. Check API endpoint and credentials." 10 78
+                fi
                 return 4
             fi
             
