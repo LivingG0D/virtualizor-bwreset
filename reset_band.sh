@@ -350,10 +350,6 @@ run_reset_logic() {
                     if [[ "$page_count" -eq 0 ]]; then
                         break
                     fi
-                    # If less than per, last page; otherwise continue
-                    if [[ "$page_count" -lt "$per" ]]; then
-                        page=$((page+1)); break
-                    fi
                     page=$((page+1))
                 done
                 # Merge pages into one JSON object
