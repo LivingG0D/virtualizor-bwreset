@@ -783,8 +783,34 @@ if [[ "${1:-}" == "--check-vps" && -n "${2:-}" ]]; then
         echo "VPS ID $vps_to_check FOUND in API response."
         exit 0
     else
-        echo "VPS ID $vps_to_check NOT found in API response."
-        exit 4
+        echo "VPS ID $vps_to_check NOT found in normal listing. Checking suspended VPSes..."
+        
+        # Try searching for suspended VPSes specifically
+        suspended_url="${api_base}&act=vs&api=json&vsstatus=s&reslen=0"
+        echo "Checking suspended VPSes: $suspended_url"
+        suspended_json=$(curl -sS -L --max-redirs 5 "$suspended_url" || echo '{}')
+        
+        if jq -e --arg vpsid "$vps_to_check" '.vs[$vpsid]' <<<"$suspended_json" >/dev/null 2>&1; then
+            echo "VPS ID $vps_to_check FOUND in SUSPENDED VPSes."
+            vps_suspend_reason=$(echo "$suspended_json" | jq -r --arg vpsid "$vps_to_check" '.vs[$vpsid].suspend_reason // "Unknown"')
+            echo "VPS Status: SUSPENDED (Reason: $vps_suspend_reason)"
+            exit 0
+        else
+            echo "VPS ID $vps_to_check NOT found in suspended VPSes either. Checking unsuspended VPSes..."
+            
+            # Try searching for unsuspended VPSes specifically  
+            unsuspended_url="${api_base}&act=vs&api=json&vsstatus=u&reslen=0"
+            echo "Checking unsuspended VPSes: $unsuspended_url"
+            unsuspended_json=$(curl -sS -L --max-redirs 5 "$unsuspended_url" || echo '{}')
+            
+            if jq -e --arg vpsid "$vps_to_check" '.vs[$vpsid]' <<<"$unsuspended_json" >/dev/null 2>&1; then
+                echo "VPS ID $vps_to_check FOUND in UNSUSPENDED VPSes."
+                exit 0
+            else
+                echo "VPS ID $vps_to_check NOT found in any API response (normal, suspended, or unsuspended)."
+                exit 4
+            fi
+        fi
     fi
 fi
 
