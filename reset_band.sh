@@ -716,6 +716,45 @@ if [[ "${1:-}" == "--cron" ]]; then
     exit 0
 fi
 
+# List available VPS IDs: non-interactive command to show first 20 VPS IDs
+if [[ "${1:-}" == "--list-vps" ]]; then
+    load_config
+    echo "Listing available VPS IDs..."
+    # Build api_base same as run_reset_logic
+    host_clean="${HOST#http://}"
+    host_clean="${host_clean#https://}"
+    host_clean="${host_clean%%/}"
+    if [[ -n "${API_BASE:-}" ]]; then
+        api_base="$API_BASE"
+    else
+        if [[ "$host_clean" == *:* ]]; then
+            api_base="https://${host_clean}/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
+        else
+            api_base="https://${host_clean}:4085/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
+        fi
+    fi
+    
+    # Get first page of VPSes
+    api_url="${api_base}&act=vs&api=json&reslen=20&page=0"
+    vs_json=$(curl -sS -L --max-redirs 5 "$api_url" 2>/dev/null || echo '{}')
+    
+    if echo "$vs_json" | jq -e '.vs' >/dev/null 2>&1; then
+        echo "First 20 VPS IDs in your system:"
+        echo "$vs_json" | jq -r '.vs | keys[]' | head -20 | while read -r vpsid; do
+            vps_name=$(echo "$vs_json" | jq -r --arg vpsid "$vpsid" '.vs[$vpsid].vps_name // "unknown"')
+            hostname=$(echo "$vs_json" | jq -r --arg vpsid "$vpsid" '.vs[$vpsid].hostname // "unknown"')
+            echo "  VPS $vpsid: $vps_name ($hostname)"
+        done
+        echo ""
+        echo "Use any of these VPS IDs to test the bandwidth reset script."
+        echo "Example: /root/vps_manager.sh --check-vps <VPS_ID>"
+    else
+        echo "Failed to fetch VPS list. Check API configuration."
+        exit 2
+    fi
+    exit 0
+fi
+
 # Quick check for a single VPS ID: non-interactive diagnostic that queries the API for one vpsid
 if [[ "${1:-}" == "--check-vps" && -n "${2:-}" ]]; then
     load_config
