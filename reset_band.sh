@@ -47,7 +47,7 @@
 #
 # API endpoints used (built from CONFIG_FILE variables)
 #   Base URL:
-#     http://${HOST}:4085/index.php?adminapikey=${KEY}&adminapipass=${PASS}
+#     https://${HOST}:4085/index.php?adminapikey=${KEY}&adminapipass=${PASS}
 #   Common calls:
 #     - List / info:  &act=vs&api=json
 #     - Reset usage:  &act=vs&bwreset=<vpsid>&api=json  (POST)
@@ -231,7 +231,7 @@ run_reset_logic() {
         log_info()  { echo "$(date '+%F %T') [INFO]  $*"  | tee -a "$LOG_FILE"; }
         log_error() { echo "$(date '+%F %T') [ERROR] $*" | tee -a "$LOG_FILE" >&2; error_flag=1; }
 
-        local api_base="http://${HOST}:4085/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
+        local api_base="https://${HOST}:4085/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
 
         log_info "Fetching server data..."
         local api_url="${api_base}&act=vs&api=json"
