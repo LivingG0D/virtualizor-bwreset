@@ -472,7 +472,7 @@ automation_menu() {
     local script_full_path
     script_full_path=$(realpath "$0")
 
-    case "$choice" in
+    case "$choice" in   
         1)
             local current_cron clean_cron
             current_cron=$(crontab -l 2>/dev/null || true)
