@@ -749,26 +749,33 @@ if [[ "${1:-}" == "--list-vps" ]]; then
     if echo "$vs_json" | jq -e '.vs' >/dev/null 2>&1; then
         vps_count=$(echo "$vs_json" | jq -r '.vs | length')
         
-        # If we got a small result (likely truncated), use paging to get all VPSes
-        if [[ "$vps_count" -le 50 ]]; then
+        # If initial response looks paged (50 or more entries), fetch pages
+        per=50
+        if [[ "$vps_count" -ge $per ]]; then
             echo "Fetching all VPS IDs using pagination..."
             # Clean up any previous temp pages
             rm -f "${DIAG_DIR}/list_vps_page_*.json" 2>/dev/null || true
-            per=50
             page=0
             while true; do
                 page_url="${api_base}&act=vs&api=json&reslen=${per}&page=${page}"
                 curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/list_vps_page_${page}.json" "$page_url" 2>/dev/null
+                # If this page doesn't contain any vps data, remove it and stop paging
                 if ! jq -e '.vs' "${DIAG_DIR}/list_vps_page_${page}.json" >/dev/null 2>&1; then
+                    rm -f "${DIAG_DIR}/list_vps_page_${page}.json" 2>/dev/null || true
                     break
                 fi
                 page_count=$(jq -r '.vs | length' "${DIAG_DIR}/list_vps_page_${page}.json" 2>/dev/null || echo 0)
+                # If page is empty, stop; otherwise if fewer than 'per' entries it's last page
                 if [[ "$page_count" -eq 0 ]]; then
+                    break
+                fi
+                if [[ "$page_count" -lt $per ]]; then
+                    # this was the last page, stop after saving it
                     break
                 fi
                 page=$((page+1))
             done
-            # Merge pages into one JSON object
+            # Merge pages into one JSON object (if any were saved)
             if ls "${DIAG_DIR}/list_vps_page_*.json" >/dev/null 2>&1; then
                 vs_json=$(jq -s 'map(.vs) | add | {vs: .}' ${DIAG_DIR}/list_vps_page_*.json 2>/dev/null || echo '{}')
                 # Clean temp pages
