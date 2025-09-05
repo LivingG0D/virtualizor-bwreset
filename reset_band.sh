@@ -231,14 +231,31 @@ run_reset_logic() {
         log_info()  { echo "$(date '+%F %T') [INFO]  $*"  | tee -a "$LOG_FILE"; }
         log_error() { echo "$(date '+%F %T') [ERROR] $*" | tee -a "$LOG_FILE" >&2; error_flag=1; }
 
-        local api_base="https://${HOST}:4085/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
+        # Normalize HOST: strip scheme and trailing slash so user may set HOST with or without http(s)://
+        local host_clean
+        host_clean="${HOST#http://}"
+        host_clean="${host_clean#https://}"
+        host_clean="${host_clean%%/}"
+
+        # If HOST already contains a port (host:port) use it, otherwise default to master port 4085
+        local api_base
+        if [[ "$host_clean" == *:* ]]; then
+            api_base="https://${host_clean}/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
+        else
+            api_base="https://${host_clean}:4085/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
+        fi
+        if [[ "$HOST" != "$host_clean" ]]; then
+            log_info "Normalized HOST from '$HOST' to '$host_clean'"
+        fi
 
         log_info "Fetching server data..."
         local api_url="${api_base}&act=vs&api=json"
         log_info "API URL: $api_url"
         local vs_json
-        vs_json=$(curl -sS "$api_url")
+        # Follow redirects (in case server redirects http->https) and limit redirects
+        vs_json=$(curl -sS -L --max-redirs 5 "$api_url")
         local curl_status=$?
+        # Detect common HTML redirect responses which mean we didn't get JSON
         log_info "API response: $vs_json"
         if (( curl_status != 0 )); then
             log_error "API request failed (curl exit $curl_status). Check network and API credentials."
@@ -248,6 +265,11 @@ run_reset_logic() {
         if [[ -z "$vs_json" ]]; then
             log_error "API returned empty response. Check API endpoint and credentials."
             whiptail --title "API Error" --msgbox "API returned empty response. Check API endpoint and credentials." 10 78
+            return 2
+        fi
+        if echo "$vs_json" | grep -qi '<html\|<script'; then
+            log_error "API response appears to be HTML (possible redirect or proxy). Response: $vs_json"
+            whiptail --title "API Error" --msgbox "API returned HTML (redirect/proxy). Verify HOST, protocol (https) and that the master API is reachable." 12 78
             return 2
         fi
 
