@@ -786,10 +786,13 @@ if [[ "${1:-}" == "--list-vps" ]]; then
                     candidate_count=0
                 fi
 
+                echo "  candidate start=${start_page}: total after merge = $candidate_count entries"
+
                 # If candidate is better, keep it
                 if [[ $candidate_count -gt $best_count ]]; then
                     best_count=$candidate_count
                     best_json="$candidate_json"
+                    echo "    -> new best candidate: start=${start_page} with $best_count entries"
                 fi
 
                 # Clean up candidate temp pages
