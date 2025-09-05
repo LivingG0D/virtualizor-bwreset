@@ -190,6 +190,9 @@ load_config() {
             echo "HOST=\"\""
             echo "KEY=\"\""
             echo "PASS=\"\""
+            echo "# Optional: full API base URL override (including scheme, host, port and index.php query string)
+# Example: API_BASE=\"https://MASTER_IP:4085/index.php?adminapikey=KEY&adminapipass=PASS\"
+API_BASE=\"\""
         } > "$CONFIG_FILE"
     fi
     # shellcheck source=/dev/null
@@ -227,6 +230,10 @@ run_reset_logic() {
         # Resets bandwidth for all or a specific VPS. Robust error handling and logging.
         local mode="$1"
         local error_flag=0
+        local diagnose_mode=0
+        if [[ "${2:-}" == "--diagnose" ]]; then
+            diagnose_mode=1
+        fi
 
         log_info()  { echo "$(date '+%F %T') [INFO]  $*"  | tee -a "$LOG_FILE"; }
         log_error() { echo "$(date '+%F %T') [ERROR] $*" | tee -a "$LOG_FILE" >&2; error_flag=1; }
@@ -237,12 +244,18 @@ run_reset_logic() {
         host_clean="${host_clean#https://}"
         host_clean="${host_clean%%/}"
 
-        # If HOST already contains a port (host:port) use it, otherwise default to master port 4085
+        # If API_BASE override is set in config, use it. Otherwise build from HOST.
         local api_base
-        if [[ "$host_clean" == *:* ]]; then
-            api_base="https://${host_clean}/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
+        if [[ -n "${API_BASE:-}" ]]; then
+            api_base="$API_BASE"
+            log_info "Using API_BASE override from config."
         else
-            api_base="https://${host_clean}:4085/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
+            # If HOST already contains a port (host:port) use it, otherwise default to master port 4085
+            if [[ "$host_clean" == *:* ]]; then
+                api_base="https://${host_clean}/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
+            else
+                api_base="https://${host_clean}:4085/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
+            fi
         fi
         if [[ "$HOST" != "$host_clean" ]]; then
             log_info "Normalized HOST from '$HOST' to '$host_clean'"
@@ -253,7 +266,19 @@ run_reset_logic() {
         log_info "API URL: $api_url"
         local vs_json
         # Follow redirects (in case server redirects http->https) and limit redirects
-        vs_json=$(curl -sS -L --max-redirs 5 "$api_url")
+        if (( diagnose_mode == 1 )); then
+            log_info "Running in diagnose mode: saving verbose curl output to /tmp/reset_band_curl_verbose.log"
+            # Save headers and verbose output for troubleshooting
+            vs_json=$(curl -sS -L --max-redirs 5 -D /tmp/reset_band_curl_headers.log -o /tmp/reset_band_curl_body.log --trace-ascii /tmp/reset_band_curl_verbose.log "$api_url" || true)
+            # If the body file exists, read it
+            if [ -f /tmp/reset_band_curl_body.log ]; then
+                vs_json=$(cat /tmp/reset_band_curl_body.log)
+            else
+                vs_json=""
+            fi
+        else
+            vs_json=$(curl -sS -L --max-redirs 5 "$api_url")
+        fi
         local curl_status=$?
         # Detect common HTML redirect responses which mean we didn't get JSON
         log_info "API response: $vs_json"
@@ -555,6 +580,15 @@ automation_menu() {
 if [[ "${1:-}" == "--cron" ]]; then
     load_config
     run_reset_logic "all"
+    exit 0
+fi
+
+# Support a diagnostic, non-interactive mode to capture curl verbose output
+if [[ "${1:-}" == "--diagnose" ]]; then
+    load_config
+    echo "Running diagnostic mode: will attempt to fetch API and save curl logs to /tmp/reset_band_curl_*.log"
+    run_reset_logic "all" --diagnose
+    echo "Diagnostic complete. Check /tmp/reset_band_curl_verbose.log and /tmp/reset_band_curl_headers.log"
     exit 0
 fi
 
