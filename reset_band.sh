@@ -168,8 +168,10 @@ trap error_handler ERR
 # --- Script Configuration ---
 CONFIG_FILE="/etc/vps_manager.conf"
 CRON_TAG="# vps-bandwidth-reset-cron"
-LOG_FILE="/tmp/reset_band.log"
-CHANGE_LOG="/tmp/reset_band_changes.log"
+# Directory to write diagnostic and run logs. Set to /root per request.
+DIAG_DIR="/root"
+LOG_FILE="${DIAG_DIR}/reset_band.log"
+CHANGE_LOG="${DIAG_DIR}/reset_band_changes.log"
 
 # --- Dependency Check ---
 for dep in whiptail curl jq; do
@@ -261,16 +263,18 @@ run_reset_logic() {
             log_info "Normalized HOST from '$HOST' to '$host_clean'"
         fi
 
-        log_info "Fetching server data..."
-        # First try a single request asking for a very large limit (some APIs honor 'limit')
-        local api_url="${api_base}&act=vs&api=json&limit=10000"
-        log_info "Attempting API URL (large limit): $api_url"
+    log_info "Fetching server data..."
+    # First try a single request asking for all records using documented 'reslen=0'
+    # Virtualizor docs: reslen = number of records to be returned (default 50), page = page number
+    local api_url="${api_base}&act=vs&api=json&reslen=0"
+    log_info "Attempting API URL (reslen=0 -> all records): $api_url"
         local vs_json
         if (( diagnose_mode == 1 )); then
-            log_info "Running in diagnose mode: saving verbose curl output to /tmp/reset_band_curl_verbose.log"
-            curl -sS -L --max-redirs 5 -D /tmp/reset_band_curl_headers.log -o /tmp/reset_band_curl_body.log --trace-ascii /tmp/reset_band_curl_verbose.log "$api_url" || true
-            if [ -f /tmp/reset_band_curl_body.log ]; then
-                vs_json=$(cat /tmp/reset_band_curl_body.log)
+            log_info "Running in diagnose mode: saving verbose curl output to ${DIAG_DIR}/reset_band_curl_verbose.log"
+            mkdir -p "${DIAG_DIR}" 2>/dev/null || true
+            curl -sS -L --max-redirs 5 -D "${DIAG_DIR}/reset_band_curl_headers.log" -o "${DIAG_DIR}/reset_band_curl_body.log" --trace-ascii "${DIAG_DIR}/reset_band_curl_verbose.log" "$api_url" || true
+            if [ -f "${DIAG_DIR}/reset_band_curl_body.log" ]; then
+                vs_json=$(cat "${DIAG_DIR}/reset_band_curl_body.log")
             else
                 vs_json=""
             fi
@@ -318,46 +322,45 @@ run_reset_logic() {
                 log_info "Found $vps_count VPS entries in API response."
             fi
             
-            # If we got a small, likely-truncated result (common default = 50), try paging.
+            # If we got a small, likely-truncated result (common default = 50), try paging
+            # using documented parameters 'reslen' (records per page) and 'page' (page index).
             if [[ "$vps_count" -le 50 ]]; then
-                log_info "API returned $vps_count entries; attempting paged requests to collect all VPSs."
+                log_info "API returned $vps_count entries; attempting paged requests (reslen/page) to collect all VPSs."
                 # Clean up any previous temp pages
-                rm -f /tmp/reset_band_page_*.json 2>/dev/null || true
+                rm -f "${DIAG_DIR}/reset_band_page_*.json" 2>/dev/null || true
                 local per=50
-                local offset=0
                 local page=0
                 while true; do
-                    local page_url="${api_base}&act=vs&api=json&start=${offset}&limit=${per}"
-                    log_info "Fetching page $page (start=$offset) -> $page_url"
+                    local page_url="${api_base}&act=vs&api=json&reslen=${per}&page=${page}"
+                    log_info "Fetching page $page (reslen=${per}) -> $page_url"
                     if (( diagnose_mode == 1 )); then
-                        curl -sS -L --max-redirs 5 -o "/tmp/reset_band_page_${page}.json" "$page_url" || true
+                                curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/reset_band_page_${page}.json" "$page_url" || true
                     else
-                        curl -sS -L --max-redirs 5 -o "/tmp/reset_band_page_${page}.json" "$page_url"
+                        curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/reset_band_page_${page}.json" "$page_url"
                     fi
                     # Validate page
-                    if ! jq -e '.vs' "/tmp/reset_band_page_${page}.json" >/dev/null 2>&1; then
+                    if ! jq -e '.vs' "${DIAG_DIR}/reset_band_page_${page}.json" >/dev/null 2>&1; then
                         log_info "Page $page did not contain 'vs' field; stopping pagination."
                         break
                     fi
                     local page_count
-                    page_count=$(jq -r '.vs | length' "/tmp/reset_band_page_${page}.json")
+                    page_count=$(jq -r '.vs | length' "${DIAG_DIR}/reset_band_page_${page}.json")
                     log_info "Page $page contains $page_count entries."
                     # If no entries, stop
                     if [[ "$page_count" -eq 0 ]]; then
                         break
                     fi
-                    # if less than per, last page
+                    # If less than per, last page; otherwise continue
                     if [[ "$page_count" -lt "$per" ]]; then
                         page=$((page+1)); break
                     fi
                     page=$((page+1))
-                    offset=$((offset+per))
                 done
                 # Merge pages into one JSON object
-                if ls /tmp/reset_band_page_*.json >/dev/null 2>&1; then
-                    vs_json=$(jq -s 'map(.vs) | add | {vs: .}' /tmp/reset_band_page_*.json 2>/dev/null || echo '{}')
+                if ls "${DIAG_DIR}/reset_band_page_*.json" >/dev/null 2>&1; then
+                    vs_json=$(jq -s 'map(.vs) | add | {vs: .}' ${DIAG_DIR}/reset_band_page_*.json 2>/dev/null || echo '{}')
                     # Clean temp pages
-                    rm -f /tmp/reset_band_page_*.json 2>/dev/null || true
+                    rm -f "${DIAG_DIR}/reset_band_page_*.json" 2>/dev/null || true
                     vps_count=$(echo "$vs_json" | jq -r '.vs | length' 2>/dev/null || echo 0)
                     log_info "After paging, total VPS entries: $vps_count"
                 fi
@@ -647,17 +650,18 @@ if [[ "${1:-}" == "--check-vps" && -n "${2:-}" ]]; then
     api_url="${api_base}&act=vs&vpsid=${vps_to_check}&api=json"
     echo "API URL: $api_url"
     # Save body and headers
-    curl -sS -D /tmp/reset_band_check_vps_headers.log -o /tmp/reset_band_check_vps_body.log --max-redirs 5 -L "$api_url" || true
-    echo "Saved response to /tmp/reset_band_check_vps_body.log and headers to /tmp/reset_band_check_vps_headers.log"
-    if grep -qi '<html\|<script' /tmp/reset_band_check_vps_body.log 2>/dev/null; then
+    mkdir -p "${DIAG_DIR}" 2>/dev/null || true
+    curl -sS -D "${DIAG_DIR}/reset_band_check_vps_headers.log" -o "${DIAG_DIR}/reset_band_check_vps_body.log" --max-redirs 5 -L "$api_url" || true
+    echo "Saved response to ${DIAG_DIR}/reset_band_check_vps_body.log and headers to ${DIAG_DIR}/reset_band_check_vps_headers.log"
+    if grep -qi '<html\|<script' "${DIAG_DIR}/reset_band_check_vps_body.log" 2>/dev/null; then
         echo "Response appears to be HTML (redirect/proxy). Check scheme/port and API_BASE." >&2
         exit 2
     fi
-    if jq -e '.vs["'"${vps_to_check}"'" ]' /tmp/reset_band_check_vps_body.log >/dev/null 2>&1; then
-        echo "VPS ID $vps_to_check FOUND in API response."; cat /tmp/reset_band_check_vps_body.log
+    if jq -e '.vs["'"${vps_to_check}"'" ]' "${DIAG_DIR}/reset_band_check_vps_body.log" >/dev/null 2>&1; then
+        echo "VPS ID $vps_to_check FOUND in API response."; cat "${DIAG_DIR}/reset_band_check_vps_body.log"
         exit 0
     else
-        echo "VPS ID $vps_to_check NOT found in API response."; cat /tmp/reset_band_check_vps_body.log
+        echo "VPS ID $vps_to_check NOT found in API response."; cat "${DIAG_DIR}/reset_band_check_vps_body.log"
         exit 4
     fi
 fi
@@ -665,9 +669,9 @@ fi
 # Support a diagnostic, non-interactive mode to capture curl verbose output
 if [[ "${1:-}" == "--diagnose" ]]; then
     load_config
-    echo "Running diagnostic mode: will attempt to fetch API and save curl logs to /tmp/reset_band_curl_*.log"
+    echo "Running diagnostic mode: will attempt to fetch API and save curl logs to ${DIAG_DIR}/reset_band_curl_*.log"
     run_reset_logic "all" --diagnose
-    echo "Diagnostic complete. Check /tmp/reset_band_curl_verbose.log and /tmp/reset_band_curl_headers.log"
+    echo "Diagnostic complete. Check ${DIAG_DIR}/reset_band_curl_verbose.log and ${DIAG_DIR}/reset_band_curl_headers.log"
     exit 0
 fi
 
