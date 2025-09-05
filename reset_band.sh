@@ -643,21 +643,55 @@ if [[ "${1:-}" == "--check-vps" && -n "${2:-}" ]]; then
             api_base="https://${host_clean}:4085/index.php?adminapikey=${KEY}&adminapipass=${PASS}"
         fi
     fi
-    api_url="${api_base}&act=vs&vpsid=${vps_to_check}&api=json"
+    api_url="${api_base}&act=vs&api=json&reslen=0"
     echo "API URL: $api_url"
-    # Save body and headers
-    mkdir -p "${DIAG_DIR}" 2>/dev/null || true
-    curl -sS -D "${DIAG_DIR}/reset_band_check_vps_headers.log" -o "${DIAG_DIR}/reset_band_check_vps_body.log" --max-redirs 5 -L "$api_url" || true
-    echo "Saved response to ${DIAG_DIR}/reset_band_check_vps_body.log and headers to ${DIAG_DIR}/reset_band_check_vps_headers.log"
-    if grep -qi '<html\|<script' "${DIAG_DIR}/reset_band_check_vps_body.log" 2>/dev/null; then
-        echo "Response appears to be HTML (redirect/proxy). Check scheme/port and API_BASE." >&2
+    vs_json=$(curl -sS -L --max-redirs 5 "$api_url")
+    curl_status=$?
+    if (( curl_status != 0 )); then
+        echo "API request failed (curl exit $curl_status). Check network and API credentials." >&2
         exit 2
     fi
-    if jq -e '.vs["'"${vps_to_check}"'" ]' "${DIAG_DIR}/reset_band_check_vps_body.log" >/dev/null 2>&1; then
-        echo "VPS ID $vps_to_check FOUND in API response."; cat "${DIAG_DIR}/reset_band_check_vps_body.log"
+    if [[ -z "$vs_json" ]]; then
+        echo "API returned empty response. Check API endpoint and credentials." >&2
+        exit 2
+    fi
+    if echo "$vs_json" | grep -qi '<html\|<script'; then
+        echo "API response appears to be HTML (possible redirect or proxy). Response: $vs_json" >&2
+        exit 2
+    fi
+    if ! echo "$vs_json" | jq -e '.vs' >/dev/null 2>&1; then
+        echo "API response missing 'vs' field. Response: $vs_json" >&2
+        exit 3
+    fi
+    vps_count=$(echo "$vs_json" | jq -r '.vs | length')
+    if [[ "$vps_count" -le 50 ]]; then
+        # Do paging
+        rm -f "${DIAG_DIR}/reset_band_page_*.json" 2>/dev/null || true
+        per=50
+        page=0
+        while true; do
+            page_url="${api_base}&act=vs&api=json&reslen=${per}&page=${page}"
+            curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/reset_band_page_${page}.json" "$page_url"
+            if ! jq -e '.vs' "${DIAG_DIR}/reset_band_page_${page}.json" >/dev/null 2>&1; then
+                break
+            fi
+            page_count=$(jq -r '.vs | length' "${DIAG_DIR}/reset_band_page_${page}.json")
+            if [[ "$page_count" -eq 0 ]]; then
+                break
+            fi
+            page=$((page+1))
+        done
+        if ls "${DIAG_DIR}/reset_band_page_*.json" >/dev/null 2>&1; then
+            vs_json=$(jq -s 'map(.vs) | add | {vs: .}' ${DIAG_DIR}/reset_band_page_*.json 2>/dev/null || echo '{}')
+            rm -f "${DIAG_DIR}/reset_band_page_*.json" 2>/dev/null || true
+        fi
+    fi
+    # Now check if the vpsid exists
+    if jq -e --arg vpsid "$vps_to_check" '.vs[$vpsid]' <<<"$vs_json" >/dev/null 2>&1; then
+        echo "VPS ID $vps_to_check FOUND in API response."
         exit 0
     else
-        echo "VPS ID $vps_to_check NOT found in API response."; cat "${DIAG_DIR}/reset_band_check_vps_body.log"
+        echo "VPS ID $vps_to_check NOT found in API response."
         exit 4
     fi
 fi
