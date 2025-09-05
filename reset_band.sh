@@ -262,32 +262,30 @@ run_reset_logic() {
         fi
 
         log_info "Fetching server data..."
-        local api_url="${api_base}&act=vs&api=json"
-        log_info "API URL: $api_url"
+        # First try a single request asking for a very large limit (some APIs honor 'limit')
+        local api_url="${api_base}&act=vs&api=json&limit=10000"
+        log_info "Attempting API URL (large limit): $api_url"
         local vs_json
-        # Follow redirects (in case server redirects http->https) and limit redirects
         if (( diagnose_mode == 1 )); then
             log_info "Running in diagnose mode: saving verbose curl output to /tmp/reset_band_curl_verbose.log"
-            # Save headers and verbose output for troubleshooting
-            vs_json=$(curl -sS -L --max-redirs 5 -D /tmp/reset_band_curl_headers.log -o /tmp/reset_band_curl_body.log --trace-ascii /tmp/reset_band_curl_verbose.log "$api_url" || true)
-            # If the body file exists, read it
+            curl -sS -L --max-redirs 5 -D /tmp/reset_band_curl_headers.log -o /tmp/reset_band_curl_body.log --trace-ascii /tmp/reset_band_curl_verbose.log "$api_url" || true
             if [ -f /tmp/reset_band_curl_body.log ]; then
                 vs_json=$(cat /tmp/reset_band_curl_body.log)
             else
                 vs_json=""
             fi
+            local curl_status=0
         else
             vs_json=$(curl -sS -L --max-redirs 5 "$api_url")
+            local curl_status=$?
         fi
-        local curl_status=$?
-        # Detect common HTML redirect responses which mean we didn't get JSON
-        log_info "API response: $vs_json"
+        log_info "API response (initial fetch): $(echo "$vs_json" | head -c 1024)"
         if (( curl_status != 0 )); then
             log_error "API request failed (curl exit $curl_status). Check network and API credentials."
             whiptail --title "API Error" --msgbox "Failed to fetch server data. Check network and API credentials." 10 78
             return 2
         fi
-        if [[ -z "$vs_json" ]]; then
+    if [[ -z "$vs_json" ]]; then
             log_error "API returned empty response. Check API endpoint and credentials."
             whiptail --title "API Error" --msgbox "API returned empty response. Check API endpoint and credentials." 10 78
             return 2
@@ -311,7 +309,6 @@ run_reset_logic() {
                 fi
                 return 3
             fi
-            
             # Check if there are any VPS entries
             local vps_count
             vps_count=$(echo "$vs_json" | jq -r '.vs | length')
@@ -321,6 +318,51 @@ run_reset_logic() {
                 log_info "Found $vps_count VPS entries in API response."
             fi
             
+            # If we got a small, likely-truncated result (common default = 50), try paging.
+            if [[ "$vps_count" -le 50 ]]; then
+                log_info "API returned $vps_count entries; attempting paged requests to collect all VPSs."
+                # Clean up any previous temp pages
+                rm -f /tmp/reset_band_page_*.json 2>/dev/null || true
+                local per=50
+                local offset=0
+                local page=0
+                while true; do
+                    local page_url="${api_base}&act=vs&api=json&start=${offset}&limit=${per}"
+                    log_info "Fetching page $page (start=$offset) -> $page_url"
+                    if (( diagnose_mode == 1 )); then
+                        curl -sS -L --max-redirs 5 -o "/tmp/reset_band_page_${page}.json" "$page_url" || true
+                    else
+                        curl -sS -L --max-redirs 5 -o "/tmp/reset_band_page_${page}.json" "$page_url"
+                    fi
+                    # Validate page
+                    if ! jq -e '.vs' "/tmp/reset_band_page_${page}.json" >/dev/null 2>&1; then
+                        log_info "Page $page did not contain 'vs' field; stopping pagination."
+                        break
+                    fi
+                    local page_count
+                    page_count=$(jq -r '.vs | length' "/tmp/reset_band_page_${page}.json")
+                    log_info "Page $page contains $page_count entries."
+                    # If no entries, stop
+                    if [[ "$page_count" -eq 0 ]]; then
+                        break
+                    fi
+                    # if less than per, last page
+                    if [[ "$page_count" -lt "$per" ]]; then
+                        page=$((page+1)); break
+                    fi
+                    page=$((page+1))
+                    offset=$((offset+per))
+                done
+                # Merge pages into one JSON object
+                if ls /tmp/reset_band_page_*.json >/dev/null 2>&1; then
+                    vs_json=$(jq -s 'map(.vs) | add | {vs: .}' /tmp/reset_band_page_*.json 2>/dev/null || echo '{}')
+                    # Clean temp pages
+                    rm -f /tmp/reset_band_page_*.json 2>/dev/null || true
+                    vps_count=$(echo "$vs_json" | jq -r '.vs | length' 2>/dev/null || echo 0)
+                    log_info "After paging, total VPS entries: $vps_count"
+                fi
+            fi
+
             if ! mapfile -t vps_ids < <(echo "$vs_json" | jq -r '.vs | keys_unsorted[]' 2>/dev/null); then
                 log_error "Failed to parse VPS IDs from API response."
                 whiptail --title "Parse Error" --msgbox "Failed to parse VPS IDs from API response." 10 78
