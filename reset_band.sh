@@ -777,9 +777,12 @@ if [[ "${1:-}" == "--list-vps" ]]; then
                         page=$((page+1))
                 done
 
-                # Merge candidate pages if any
-                if ls "${DIAG_DIR}/reset_band_page_candidate_${start_page}_*.json" >/dev/null 2>&1; then
-                    candidate_json=$(jq -s 'map(.vs) | add | {vs: .}' ${DIAG_DIR}/reset_band_page_candidate_${start_page}_*.json 2>/dev/null || echo '{}')
+                # Merge candidate pages if any (use array globbing to avoid quoted-glob issues)
+                shopt -s nullglob
+                candidate_files=("${DIAG_DIR}"/reset_band_page_candidate_${start_page}_*.json)
+                shopt -u nullglob
+                if (( ${#candidate_files[@]} )); then
+                    candidate_json=$(jq -s 'map(.vs) | add | {vs: .}' "${candidate_files[@]}" 2>/dev/null || echo '{}')
                     candidate_count=$(echo "$candidate_json" | jq -r '.vs | length' 2>/dev/null || echo 0)
                     echo "Candidate start=${start_page}: merged ${candidate_count} total VPS entries"
                 else
