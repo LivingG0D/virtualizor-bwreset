@@ -761,17 +761,20 @@ if [[ "${1:-}" == "--list-vps" ]]; then
                 rm -f "${DIAG_DIR}/reset_band_page_candidate_${start_page}_*.json" 2>/dev/null || true
                 page=$start_page
                 while true; do
-                    page_url="${api_base}&act=vs&api=json&reslen=${per}&page=${page}"
-                    curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" "$page_url" 2>/dev/null
-                    if ! jq -e '.vs' "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" >/dev/null 2>&1; then
-                        rm -f "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" 2>/dev/null || true
-                        break
-                    fi
-                    page_count=$(jq -r '.vs | length' "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" 2>/dev/null || echo 0)
-                    if [[ "$page_count" -eq 0 ]]; then
-                        break
-                    fi
-                    page=$((page+1))
+                        page_url="${api_base}&act=vs&api=json&reslen=${per}&page=${page}"
+                        echo "Fetching candidate start=${start_page} page=${page} -> $page_url"
+                        curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" "$page_url" 2>/dev/null
+                        if ! jq -e '.vs' "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" >/dev/null 2>&1; then
+                            echo "  candidate start=${start_page} page=${page}: no 'vs' field (stopping)"
+                            rm -f "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" 2>/dev/null || true
+                            break
+                        fi
+                        page_count=$(jq -r '.vs | length' "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" 2>/dev/null || echo 0)
+                        echo "  candidate start=${start_page} page=${page}: $page_count entries"
+                        if [[ "$page_count" -eq 0 ]]; then
+                            break
+                        fi
+                        page=$((page+1))
                 done
 
                 # Merge candidate pages if any
