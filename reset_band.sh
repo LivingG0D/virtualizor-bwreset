@@ -41,8 +41,9 @@
 #
 # Important files / variables
 #   CONFIG_FILE   = /etc/vps_manager.conf
-#   LOG_FILE      = /tmp/reset_band.log            # detailed run log
-#   CHANGE_LOG    = /tmp/reset_band_changes.log    # human readable change summary
+#   DIAG_DIR      = /root                          # directory for diagnostic logs
+#   LOG_FILE      = /root/reset_band.log           # detailed run log
+#   CHANGE_LOG    = /root/reset_band_changes.log   # human readable change summary
 #   CRON_TAG      = "# vps-bandwidth-reset-cron"   # marker used to manage cron entries
 #
 # API endpoints used (built from CONFIG_FILE variables)
