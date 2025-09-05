@@ -752,29 +752,50 @@ if [[ "${1:-}" == "--list-vps" ]]; then
         # If we got a small, likely-truncated result (common default = 50), try paging
         if [[ "$vps_count" -le 50 ]]; then
             echo "Fetching all VPS IDs using pagination..."
-            # Clean up any previous temp pages
-            rm -f "${DIAG_DIR}/reset_band_page_*.json" 2>/dev/null || true
             per=50
-            page=0
-            while true; do
-                page_url="${api_base}&act=vs&api=json&reslen=${per}&page=${page}"
-                curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/reset_band_page_${page}.json" "$page_url" 2>/dev/null
-                if ! jq -e '.vs' "${DIAG_DIR}/reset_band_page_${page}.json" >/dev/null 2>&1; then
-                    break
+            best_count=$vps_count
+            best_json="$vs_json"
+            # Try both common page indexing schemes (0-based and 1-based) and pick the best result
+            for start_page in 0 1; do
+                # Clean candidate temp pages
+                rm -f "${DIAG_DIR}/reset_band_page_candidate_${start_page}_*.json" 2>/dev/null || true
+                page=$start_page
+                while true; do
+                    page_url="${api_base}&act=vs&api=json&reslen=${per}&page=${page}"
+                    curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" "$page_url" 2>/dev/null
+                    if ! jq -e '.vs' "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" >/dev/null 2>&1; then
+                        rm -f "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" 2>/dev/null || true
+                        break
+                    fi
+                    page_count=$(jq -r '.vs | length' "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" 2>/dev/null || echo 0)
+                    if [[ "$page_count" -eq 0 ]]; then
+                        break
+                    fi
+                    page=$((page+1))
+                done
+
+                # Merge candidate pages if any
+                if ls "${DIAG_DIR}/reset_band_page_candidate_${start_page}_*.json" >/dev/null 2>&1; then
+                    candidate_json=$(jq -s 'map(.vs) | add | {vs: .}' ${DIAG_DIR}/reset_band_page_candidate_${start_page}_*.json 2>/dev/null || echo '{}')
+                    candidate_count=$(echo "$candidate_json" | jq -r '.vs | length' 2>/dev/null || echo 0)
+                else
+                    candidate_json='{}'
+                    candidate_count=0
                 fi
-                page_count=$(jq -r '.vs | length' "${DIAG_DIR}/reset_band_page_${page}.json" 2>/dev/null || echo 0)
-                if [[ "$page_count" -eq 0 ]]; then
-                    break
+
+                # If candidate is better, keep it
+                if [[ $candidate_count -gt $best_count ]]; then
+                    best_count=$candidate_count
+                    best_json="$candidate_json"
                 fi
-                page=$((page+1))
+
+                # Clean up candidate temp pages
+                rm -f "${DIAG_DIR}/reset_band_page_candidate_${start_page}_*.json" 2>/dev/null || true
             done
-            # Merge pages into one JSON object
-            if ls "${DIAG_DIR}/reset_band_page_*.json" >/dev/null 2>&1; then
-                vs_json=$(jq -s 'map(.vs) | add | {vs: .}' ${DIAG_DIR}/reset_band_page_*.json 2>/dev/null || echo '{}')
-                # Clean temp pages
-                rm -f "${DIAG_DIR}/reset_band_page_*.json" 2>/dev/null || true
-                vps_count=$(echo "$vs_json" | jq -r '.vs | length' 2>/dev/null || echo 0)
-            fi
+
+            # Use best result
+            vs_json="$best_json"
+            vps_count=$best_count
         fi
         
         echo "All $vps_count VPS IDs in your system:"
