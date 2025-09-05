@@ -424,9 +424,56 @@ run_reset_logic() {
                 fi
                 # Check again after paging
                 if ! echo "$vs_json" | jq -e --arg vpsid "$mode" '.vs[$vpsid]' > /dev/null; then
-                    log_error "VPS ID $mode not found in API response."
-                    whiptail --title "VPS Not Found" --msgbox "VPS ID $mode not found in API response." 10 78
-                    return 4
+                    log_info "VPS $mode not found in normal listing. Checking suspended VPSes..."
+                    
+                    # Try searching for suspended VPSes specifically
+                    local suspended_url="${api_base}&act=vs&api=json&vsstatus=s&reslen=0"
+                    log_info "Checking suspended VPSes: $suspended_url"
+                    local suspended_json
+                    if (( diagnose_mode == 1 )); then
+                        suspended_json=$(curl -sS -L --max-redirs 5 "$suspended_url" || echo '{}')
+                    else
+                        suspended_json=$(curl -sS -L --max-redirs 5 "$suspended_url")
+                    fi
+                    
+                    if echo "$suspended_json" | jq -e --arg vpsid "$mode" '.vs[$vpsid]' > /dev/null 2>&1; then
+                        log_info "VPS $mode found in suspended VPSes list."
+                        vs_json="$suspended_json"
+                        local vps_status="suspended"
+                        local vps_suspend_reason=$(echo "$vs_json" | jq -r --arg vpsid "$mode" '.vs[$vpsid].suspend_reason // "Unknown"')
+                        log_info "VPS $mode is SUSPENDED. Reason: $vps_suspend_reason"
+                        
+                        # Ask user if they want to proceed with suspended VPS
+                        if [ -t 0 ]; then  # Check if running interactively
+                            if ! whiptail --title "VPS Suspended" --yesno "VPS $mode is SUSPENDED (Reason: $vps_suspend_reason).\n\nDo you want to proceed with bandwidth reset anyway?" 12 78; then
+                                log_info "User chose not to proceed with suspended VPS $mode"
+                                return 0
+                            fi
+                        else
+                            log_info "Non-interactive mode: proceeding with suspended VPS $mode"
+                        fi
+                    else
+                        log_info "VPS $mode not found in suspended VPSes either. Checking unsuspended VPSes..."
+                        
+                        # Try searching for unsuspended VPSes specifically  
+                        local unsuspended_url="${api_base}&act=vs&api=json&vsstatus=u&reslen=0"
+                        log_info "Checking unsuspended VPSes: $unsuspended_url"
+                        local unsuspended_json
+                        if (( diagnose_mode == 1 )); then
+                            unsuspended_json=$(curl -sS -L --max-redirs 5 "$unsuspended_url" || echo '{}')
+                        else
+                            unsuspended_json=$(curl -sS -L --max-redirs 5 "$unsuspended_url")
+                        fi
+                        
+                        if echo "$unsuspended_json" | jq -e --arg vpsid "$mode" '.vs[$vpsid]' > /dev/null 2>&1; then
+                            log_info "VPS $mode found in unsuspended VPSes list."
+                            vs_json="$unsuspended_json"
+                        else
+                            log_error "VPS ID $mode not found in any API response (normal, suspended, or unsuspended)."
+                            whiptail --title "VPS Not Found" --msgbox "VPS ID $mode not found in any API response.\n\nChecked:\n- Normal listing\n- Suspended VPSes\n- Unsuspended VPSes\n\nVPS may not exist or may be in an unusual state." 14 78
+                            return 4
+                        fi
+                    fi
                 fi
             fi
             vps_ids=("$mode")
@@ -440,6 +487,7 @@ run_reset_logic() {
         fi
 
         for vpsid in "${vps_ids[@]}"; do
+
             log_info "─ VPS $vpsid"
 
             local limit_str
