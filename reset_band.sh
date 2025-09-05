@@ -782,7 +782,35 @@ if [[ "${1:-}" == "--list-vps" ]]; then
                 candidate_files=("${DIAG_DIR}"/reset_band_page_candidate_${start_page}_*.json)
                 shopt -u nullglob
                 if (( ${#candidate_files[@]} )); then
-                    candidate_json=$(jq -s 'map(.vs) | add | {vs: .}' "${candidate_files[@]}" 2>/dev/null || echo '{}')
+                    echo "  Candidate files: ${candidate_files[*]}"
+                    # Print short preview of each file to help debugging if jq fails
+                    for cf in "${candidate_files[@]}"; do
+                        echo "    -> ${cf}: size=$(stat -c%s "${cf}" 2>/dev/null || echo '?') bytes"
+                        # show first 160 chars of file for quick inspection
+                        head -c 160 "${cf}" | sed -n '1p' | sed 's/$/\n/' | sed 's/\n/\n    /g' || true
+                    done
+
+                    # Try to merge all pages at once. Capture jq exit status so set -e doesn't abort.
+                    candidate_json=$(jq -s 'map(.vs) | add | {vs: .}' "${candidate_files[@]}" 2>"${DIAG_DIR}/reset_band_jq_error.log" ) || true
+                    jq_exit=$?
+                    if [[ $jq_exit -ne 0 || -z "$candidate_json" ]]; then
+                        echo "  jq -s failed (exit=$jq_exit). Inspecting ${DIAG_DIR}/reset_band_jq_error.log"
+                        if [[ -s "${DIAG_DIR}/reset_band_jq_error.log" ]]; then
+                            echo "---- jq error (truncated) ----"
+                            head -n 40 "${DIAG_DIR}/reset_band_jq_error.log" | sed 's/^/    /'
+                            echo "---- end jq error ----"
+                        fi
+                        # Fallback: merge incrementally to tolerate partial/broken files
+                        combined='{}'
+                        for cf in "${candidate_files[@]}"; do
+                            part=$(jq -r '.vs' "${cf}" 2>/dev/null || echo '{}')
+                            # merge into combined
+                            combined=$(jq -n --argjson a "$combined" --argjson b "$part" '$a + $b' 2>/dev/null || echo '{}')
+                        done
+                        # wrap into candidate_json
+                        candidate_json=$(jq -n --argjson vs "$combined" '{vs: $vs}' 2>/dev/null || echo '{}')
+                    fi
+
                     candidate_count=$(echo "$candidate_json" | jq -r '.vs | length' 2>/dev/null || echo 0)
                     echo "Candidate start=${start_page}: merged ${candidate_count} total VPS entries"
                 else
