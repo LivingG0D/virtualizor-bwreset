@@ -494,16 +494,7 @@ run_reset_logic() {
                         local vps_status="suspended"
                         local vps_suspend_reason=$(echo "$vs_json" | jq -r --arg vpsid "$mode" '.vs[$vpsid].suspend_reason // "Unknown"')
                         log_info "VPS $mode is SUSPENDED. Reason: $vps_suspend_reason"
-                        
-                        # Ask user if they want to proceed with suspended VPS
-                        if [ -t 0 ]; then  # Check if running interactively
-                            if ! whiptail --title "VPS Suspended" --yesno "VPS $mode is SUSPENDED (Reason: $vps_suspend_reason).\n\nDo you want to proceed with bandwidth reset anyway?" 12 78; then
-                                log_info "User chose not to proceed with suspended VPS $mode"
-                                return 0
-                            fi
-                        else
-                            log_info "Non-interactive mode: proceeding with suspended VPS $mode"
-                        fi
+                        log_info "Proceeding with suspended VPS $mode (no interactive prompt)."
                     else
                         log_info "VPS $mode not found in suspended VPSes either. Checking unsuspended VPSes..."
                         
@@ -594,7 +585,18 @@ run_reset_logic() {
             local plid
             plid=$(echo "$vs_json" | jq -r --arg vpsid "$vpsid" '.vs[$vpsid].plid // 0')
 
-            local new_limit=$(( limit - used )); (( new_limit < 0 )) && new_limit=0
+            # Calculate new plan bandwidth
+            # For regular (non-negative) plans: reduce limit by used, but not below 0
+            # For negative plans (special cases): increase the negative allowance by adding used
+            local new_limit
+            if (( limit < 0 )); then
+                # Negative plan: move towards zero by adding used to the negative limit
+                new_limit=$(( limit + used ))
+            else
+                # Regular plan: subtract used; allow negative remainder when usage > limit
+                new_limit=$(( limit - used ))
+            fi
+            # For logging, show the new plan value which may be negative
             log_info "$vpsid : ${used}/${limit} GB → 0/${new_limit} GB"
 
             local reset
