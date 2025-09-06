@@ -331,44 +331,69 @@ run_reset_logic() {
                 log_info "Found $vps_count VPS entries in API response."
             fi
             
-            # If we got a small, likely-truncated result (common default = 50), try paging
-            # using documented parameters 'reslen' (records per page) and 'page' (page index).
+            # If we got a small, likely-truncated result (common default = 50), try robust paging
+            # Try both common page indexing schemes (0-based and 1-based) and pick the best result.
             if [[ "$vps_count" -le 50 ]]; then
                 log_info "API returned $vps_count entries; attempting paged requests (reslen/page) to collect all VPSs."
-                # Clean up any previous temp pages
-                rm -f "${DIAG_DIR}/reset_band_page_*.json" 2>/dev/null || true
                 local per=50
-                local page=0
-                while true; do
-                    local page_url="${api_base}&act=vs&api=json&reslen=${per}&page=${page}"
-                    log_info "Fetching page $page (reslen=${per}) -> $page_url"
-                    if (( diagnose_mode == 1 )); then
-                                curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/reset_band_page_${page}.json" "$page_url" || true
+                local best_count=$vps_count
+                local best_json="$vs_json"
+                for start_page in 0 1; do
+                    # Clean candidate temp pages
+                    rm -f "${DIAG_DIR}/reset_band_page_candidate_${start_page}_*.json" 2>/dev/null || true
+                    local page=$start_page
+                    while true; do
+                        local page_url="${api_base}&act=vs&api=json&reslen=${per}&page=${page}"
+                        log_info "Fetching candidate start=${start_page} page=${page} -> $page_url"
+                        if (( diagnose_mode == 1 )); then
+                            curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" "$page_url" || true
+                        else
+                            curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" "$page_url"
+                        fi
+                        if ! jq -e '.vs' "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" >/dev/null 2>&1; then
+                            log_info "  candidate start=${start_page} page=${page}: no 'vs' field (stopping)"
+                            rm -f "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" 2>/dev/null || true
+                            break
+                        fi
+                        local page_count
+                        page_count=$(jq -r '.vs | length' "${DIAG_DIR}/reset_band_page_candidate_${start_page}_${page}.json" 2>/dev/null || echo 0)
+                        log_info "  candidate start=${start_page} page=${page}: $page_count entries"
+                        if [[ "$page_count" -eq 0 ]]; then
+                            break
+                        fi
+                        page=$((page+1))
+                    done
+
+                    # Merge candidate pages if any
+                    shopt -s nullglob
+                    candidate_files=("${DIAG_DIR}"/reset_band_page_candidate_${start_page}_*.json)
+                    shopt -u nullglob
+                    if (( ${#candidate_files[@]} )); then
+                        # Try batch merge with normalization
+                        local candidate_json
+                        candidate_json=$(jq -s 'map(.vs | if type=="array" then (map( if has("vpsid") then { ( (.vpsid|tostring) ): . } elif has("vps_id") then { ( (.vps_id|tostring) ): . } else {} end ) | add) else . end) | add | {vs: .}' "${candidate_files[@]}" 2>/dev/null || echo '{}')
+                        candidate_count=$(echo "$candidate_json" | jq -r '.vs | length' 2>/dev/null || echo 0)
+                        log_info "Candidate start=${start_page}: merged ${candidate_count} total VPS entries"
+                        # Save candidate merged JSON
+                        echo "$candidate_json" > "${DIAG_DIR}/reset_band_candidate_${start_page}_merged.json" 2>/dev/null || true
+                        # Clean candidate pages
+                        rm -f "${DIAG_DIR}/reset_band_page_candidate_${start_page}_*.json" 2>/dev/null || true
+                        if [[ $candidate_count -gt $best_count ]]; then
+                            best_count=$candidate_count
+                            best_json="$candidate_json"
+                            log_info "New best candidate: start=${start_page} with ${candidate_count} entries"
+                        fi
                     else
-                        curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/reset_band_page_${page}.json" "$page_url"
+                        log_info "Candidate start=${start_page}: no pages saved, count=0"
                     fi
-                    # Validate page
-                    if ! jq -e '.vs' "${DIAG_DIR}/reset_band_page_${page}.json" >/dev/null 2>&1; then
-                        log_info "Page $page did not contain 'vs' field; stopping pagination."
-                        break
-                    fi
-                    local page_count
-                    page_count=$(jq -r '.vs | length' "${DIAG_DIR}/reset_band_page_${page}.json")
-                    log_info "Page $page contains $page_count entries."
-                    # If no entries, stop
-                    if [[ "$page_count" -eq 0 ]]; then
-                        break
-                    fi
-                    page=$((page+1))
                 done
-                # Merge pages into one JSON object
-                if ls "${DIAG_DIR}/reset_band_page_*.json" >/dev/null 2>&1; then
-                    vs_json=$(jq -s 'map(.vs | if type=="array" then {} else . end) | add | {vs: .}' ${DIAG_DIR}/reset_band_page_*.json 2>/dev/null || echo '{}')
-                    # Clean temp pages
-                    rm -f "${DIAG_DIR}/reset_band_page_*.json" 2>/dev/null || true
-                    vps_count=$(echo "$vs_json" | jq -r '.vs | length' 2>/dev/null || echo 0)
-                    log_info "After paging, total VPS entries: $vps_count"
-                fi
+                # Use best result
+                vs_json="$best_json"
+                vps_count=$best_count
+                # Save merged JSON for inspection
+                echo "$vs_json" > "${DIAG_DIR}/reset_band_merged_vs.json" 2>/dev/null || true
+                log_info "Saved merged VS JSON to ${DIAG_DIR}/reset_band_merged_vs.json (size=$(stat -c%s \"${DIAG_DIR}/reset_band_merged_vs.json\" 2>/dev/null || echo '?') bytes)"
+                log_info "Merged .vs type: $(echo "$vs_json" | jq -r '.vs | type' 2>/dev/null || echo 'unknown')"
             fi
 
             if ! mapfile -t vps_ids < <(echo "$vs_json" | jq -r '.vs | keys_unsorted[]' 2>/dev/null); then
@@ -407,6 +432,12 @@ run_reset_logic() {
                         else
                             curl -sS -L --max-redirs 5 -o "${DIAG_DIR}/reset_band_page_${page}.json" "$page_url"
                         fi
+                        # Debug: confirm file was created
+                        if [[ -f "${DIAG_DIR}/reset_band_page_${page}.json" ]]; then
+                            log_info "File created: ${DIAG_DIR}/reset_band_page_${page}.json (size=$(stat -c%s \"${DIAG_DIR}/reset_band_page_${page}.json\" 2>/dev/null || echo '?'))"
+                        else
+                            log_info "ERROR: Failed to create ${DIAG_DIR}/reset_band_page_${page}.json"
+                        fi
                         # Validate page
                         if ! jq -e '.vs' "${DIAG_DIR}/reset_band_page_${page}.json" >/dev/null 2>&1; then
                             log_info "Page $page did not contain 'vs' field; stopping pagination."
@@ -422,12 +453,25 @@ run_reset_logic() {
                         page=$((page+1))
                     done
                     # Merge pages into one JSON object
-                    if ls "${DIAG_DIR}/reset_band_page_*.json" >/dev/null 2>&1; then
-                        vs_json=$(jq -s 'map(.vs | if type=="array" then {} else . end) | add | {vs: .}' ${DIAG_DIR}/reset_band_page_*.json 2>/dev/null || echo '{}')
+                    log_info "Checking for page files in ${DIAG_DIR}..."
+                    # Use nullglob to safely expand the glob into an array; quoted globs won't expand
+                    shopt -s nullglob
+                    page_files=("${DIAG_DIR}"/reset_band_page_*.json)
+                    shopt -u nullglob
+                    if (( ${#page_files[@]} )); then
+                        log_info "Found ${#page_files[@]} page files: ${page_files[*]}"
+                        # Robust merge: convert any array-shaped .vs into an object keyed by vps id
+                        vs_json=$(jq -s 'map(.vs | if type=="array" then (map( if has("vpsid") then { ( (.vpsid|tostring) ): . } elif has("vps_id") then { ( (.vps_id|tostring) ): . } else {} end ) | add) else . end) | add | {vs: .}' "${page_files[@]}" 2>/dev/null || echo '{}')
                         # Clean temp pages
-                        rm -f "${DIAG_DIR}/reset_band_page_*.json" 2>/dev/null || true
+                        rm -f "${DIAG_DIR}"/reset_band_page_*.json 2>/dev/null || true
                         vps_count=$(echo "$vs_json" | jq -r '.vs | length' 2>/dev/null || echo 0)
                         log_info "After paging, total VPS entries: $vps_count"
+                        # Save merged JSON for inspection
+                        echo "$vs_json" > "${DIAG_DIR}/reset_band_merged_vs.json" 2>/dev/null || true
+                        log_info "Saved merged VS JSON to ${DIAG_DIR}/reset_band_merged_vs.json (size=$(stat -c%s \"${DIAG_DIR}/reset_band_merged_vs.json\" 2>/dev/null || echo '?') bytes)"
+                        log_info "Merged .vs type: $(echo "$vs_json" | jq -r '.vs | type' 2>/dev/null || echo 'unknown')"
+                    else
+                        log_info "No page files found - merge skipped"
                     fi
                 fi
                 # Check again after paging
@@ -791,7 +835,7 @@ if [[ "${1:-}" == "--list-vps" ]]; then
                     done
 
                     # Try to merge all pages at once. Capture jq exit status so set -e doesn't abort.
-                    candidate_json=$(jq -s 'map(.vs | if type=="array" then {} else . end) | add | {vs: .}' "${candidate_files[@]}" 2>"${DIAG_DIR}/reset_band_jq_error.log" ) || true
+                    candidate_json=$(jq -s 'map(.vs | if type=="array" then (map( if has("vpsid") then { ( (.vpsid|tostring) ): . } elif has("vps_id") then { ( (.vps_id|tostring) ): . } else {} end ) | add) else . end) | add | {vs: .}' "${candidate_files[@]}" 2>"${DIAG_DIR}/reset_band_jq_error.log" ) || true
                     jq_exit=$?
                     if [[ $jq_exit -ne 0 || -z "$candidate_json" ]]; then
                         echo "  jq -s failed (exit=$jq_exit). Inspecting ${DIAG_DIR}/reset_band_jq_error.log"
@@ -803,7 +847,7 @@ if [[ "${1:-}" == "--list-vps" ]]; then
                         # Fallback: merge incrementally to tolerate partial/broken files
                         combined='{}'
                         for cf in "${candidate_files[@]}"; do
-                            part=$(jq -r '.vs | if type=="array" then {} else . end' "${cf}" 2>/dev/null || echo '{}')
+                            part=$(jq -c '.vs | if type=="array" then (map( if has("vpsid") then { ( (.vpsid|tostring) ): . } elif has("vps_id") then { ( (.vps_id|tostring) ): . } else {} end ) | add) else . end' "${cf}" 2>/dev/null || echo '{}')
                             # merge into combined
                             combined=$(jq -n --argjson a "$combined" --argjson b "$part" '$a + $b' 2>/dev/null || echo '{}')
                         done
@@ -812,6 +856,9 @@ if [[ "${1:-}" == "--list-vps" ]]; then
                     fi
 
                     candidate_count=$(echo "$candidate_json" | jq -r '.vs | length' 2>/dev/null || echo 0)
+                    # Save candidate merged JSON for inspection
+                    echo "$candidate_json" > "${DIAG_DIR}/reset_band_candidate_${start_page}_merged.json" 2>/dev/null || true
+                    echo "  Saved candidate merged JSON to ${DIAG_DIR}/reset_band_candidate_${start_page}_merged.json (size=$(stat -c%s \"${DIAG_DIR}/reset_band_candidate_${start_page}_merged.json\" 2>/dev/null || echo '?') bytes)"
                     echo "Candidate start=${start_page}: merged ${candidate_count} total VPS entries"
                 else
                     candidate_json='{}'
@@ -833,6 +880,10 @@ if [[ "${1:-}" == "--list-vps" ]]; then
             # Use best result
             vs_json="$best_json"
             vps_count=$best_count
+            # Save final merged JSON for inspection
+            echo "$vs_json" > "${DIAG_DIR}/reset_band_merged_vs.json" 2>/dev/null || true
+            echo "Saved merged VS JSON to ${DIAG_DIR}/reset_band_merged_vs.json (size=$(stat -c%s \"${DIAG_DIR}/reset_band_merged_vs.json\" 2>/dev/null || echo '?') bytes)"
+            echo "Merged .vs type: $(echo "$vs_json" | jq -r '.vs | type' 2>/dev/null || echo 'unknown')"
         fi
         
         echo "All $vps_count VPS IDs in your system:"
@@ -951,8 +1002,11 @@ if [[ "${1:-}" == "--check-vps" && -n "${2:-}" ]]; then
             page=$((page+1))
         done
         if ls "${DIAG_DIR}/reset_band_page_*.json" >/dev/null 2>&1; then
-            vs_json=$(jq -s 'map(.vs) | add | {vs: .}' ${DIAG_DIR}/reset_band_page_*.json 2>/dev/null || echo '{}')
+            vs_json=$(jq -s 'map(.vs | if type=="array" then (map( if has("vpsid") then { ( (.vpsid|tostring) ): . } elif has("vps_id") then { ( (.vps_id|tostring) ): . } else {} end ) | add) else . end) | add | {vs: .}' ${DIAG_DIR}/reset_band_page_*.json 2>/dev/null || echo '{}')
             rm -f "${DIAG_DIR}/reset_band_page_*.json" 2>/dev/null || true
+            # Save merged JSON for inspection
+            echo "$vs_json" > "${DIAG_DIR}/reset_band_merged_vs.json" 2>/dev/null || true
+            echo "Saved merged VS JSON to ${DIAG_DIR}/reset_band_merged_vs.json"
         fi
     fi
     # Now check if the vpsid exists
