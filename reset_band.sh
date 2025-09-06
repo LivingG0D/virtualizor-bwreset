@@ -585,6 +585,13 @@ run_reset_logic() {
             local plid
             plid=$(echo "$vs_json" | jq -r --arg vpsid "$vpsid" '.vs[$vpsid].plid // 0')
 
+            # If usage exceeds positive plan limit, skip this VPS per new rule
+            if (( limit > 0 )) && (( used > limit )); then
+                log_info "$vpsid : used ($used GB) exceeds plan limit ($limit GB) — skipping VPS"
+                printf "%(%F %T)T  VPS %s  SKIPPED used=%d limit=%d (plan %d)\n" -1 "$vpsid" "$used" "$limit" "$plid" >>"$CHANGE_LOG"
+                continue
+            fi
+
             # Calculate new plan bandwidth
             # For regular (non-negative) plans: reduce limit by used, but not below 0
             # For negative plans (special cases): increase the negative allowance by adding used
