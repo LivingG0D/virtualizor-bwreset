@@ -1,6 +1,6 @@
 # Virtualizor Bandwidth Carry-Over Manager
 
-A user-friendly, menu-driven command-line tool to automate the process of resetting and carrying over unused bandwidth for Virtualizor-based VPSs. This script allows you to manage the entire process, from configuration to manual runs and cron job automation, through a simple interface.
+A menu-driven command-line tool that resets bandwidth usage for Virtualizor VPSs and carries the unused quota over into each VPS's limit. Configuration, manual runs and cron automation all live in one script.
 
 **Created by LivingGOD**
 
@@ -8,75 +8,111 @@ A user-friendly, menu-driven command-line tool to automate the process of resett
 
 ## ✨ Features
 
-* **All-in-One Interface:** Manage configuration, manual resets, and automation from a single command.
+* **All-in-one interface:** configuration, manual resets and automation from a single command.
+* **Carry-over:** for each VPS, usage is reset to 0 and the limit becomes `limit - used`, so only the unused quota remains. The VPS keeps its plan ID.
+* **Fast:** VPSs are processed in parallel (5 at a time by default).
+* **Safe:** a dry run shows every change before you make one. A lock stops two runs from overlapping. The API credentials are stored with mode `600` and never appear in the process list.
+* **Targeting:** reset all VPSs on the master, or a single VPS ID.
+* **Automation:** daily, monthly or last-day-of-month cron jobs.
 
-* **Dedicated Configuration:** Safely stores your API credentials in `/etc/vps_manager.conf`.
+### Carry-over rules
 
-* **Intelligent Carry-Over:** Calculates unused bandwidth and applies it as the new limit for the next billing cycle.
+| Plan limit | What happens |
+|---|---|
+| `0` (unlimited) | Usage is reset. The limit stays `0`. |
+| Positive, usage < limit | Usage is reset. The new limit is `limit - used`. |
+| Positive, usage ≥ limit | The VPS is skipped and logged as `SKIPPED`. A new limit of `0` would make it unlimited. |
+| Negative | Usage is reset. The new limit is `limit + used`, which moves it towards zero. |
 
-* **Flexible Targeting:** Reset bandwidth for a single VPS or all servers on the node.
+Usage is rounded down to whole GB. A VPS whose `bandwidth`, `used_bandwidth` or `plid` is missing or not a number is skipped and reported as an error.
 
-* **Full Automation:** Easily set up, view, and remove daily or monthly cron jobs.
+## ✅ Compatibility
 
-* **Safe & Robust:** Includes dependency checks, robust error handling, and detailed logging to `/tmp/reset_band.log`.
+* Virtualizor **3.3.0** and later, using the Admin API on port `4085`. The calls match Virtualizor's current documentation and official PHP SDK: `act=vs` (list, 1-based `page`/`reslen` paging), `act=vs&bwreset=ID`, and `act=managevps` with `editvps=1&theme_edit=1`.
+* Linux with `bash` 4+, `curl`, `jq` 1.5+, `whiptail` (menu only), `flock` and `cron`.
+
+Install the dependencies:
+
+```bash
+apt install -y curl jq whiptail     # Debian / Ubuntu
+dnf install -y curl jq newt         # AlmaLinux / Rocky
+```
 
 ## 🚀 Installation
 
-Use one of the following one-line commands to download the script to `/root/`, make it executable, and run it for the first time.
+Download the script to `/root/`, make it executable, and run it:
 
-**Using `wget`:**
-```
-wget -O /root/vps_manager.sh \
-  https://raw.githubusercontent.com/LivingG0D/virtualizor-bwreset/refs/heads/main/reset_band.sh && \
-chmod +x /root/vps_manager.sh && \
-/root/vps_manager.sh
-
+```bash
+curl -fL -o /root/vps_manager.sh https://raw.githubusercontent.com/LivingG0D/virtualizor-bwreset/refs/heads/main/reset_band.sh && chmod +x /root/vps_manager.sh && /root/vps_manager.sh
 ```
 
-**Using `curl`:**
-```
-curl -L -o /root/vps_manager.sh \
-  https://raw.githubusercontent.com/LivingG0D/virtualizor-bwreset/refs/heads/main/reset_band.sh && \
-chmod +x /root/vps_manager.sh && \
-/root/vps_manager.sh
+To update, run the same command again. Your configuration and cron job are kept.
 
-```
+## 🔑 API credentials
 
-## ⚙️ First-Time Setup
+Since Virtualizor 3.1, API credentials have their own ACL and IP whitelist. In the admin panel, open **API Credentials** and click **Create API Credential**. Give the key access to:
 
-The first time you run the script, it will automatically create a configuration file at `/etc/vps_manager.conf`.
+* listing virtual servers,
+* resetting bandwidth,
+* editing VMs (**Edit VM**).
+
+If you use an IP whitelist, add the IP of the machine that runs this script. You can also use the master key from **Configuration → Server Info**.
+
+## ⚙️ First-time setup
+
+The first run creates `/etc/vps_manager.conf`.
 
 1. Run the script: `/root/vps_manager.sh`
+2. Choose **Configure**.
+3. Enter the master's IP or hostname, the API key, the API password and the number of parallel jobs. Later, leave the key or password blank to keep the stored one.
 
-2. Select **1. Configure Script** from the main menu.
+The host can include a port (`panel.example.com:4085`) or a scheme (`http://10.0.0.5:4084` for the non-SSL port). Without them, `https://HOST:4085` is used. To use a full URL instead, set `API_BASE` in the config file.
 
-3. Enter your Virtualizor Host IP, API Key, and API Password.
+Then check what a reset would do before you change anything:
 
-Your credentials are now saved, and you can proceed to use the other script features.
+```bash
+/root/vps_manager.sh --dry-run
+```
 
 ## 🔧 Usage
 
-* **Configure:** Edit your API credentials.
+Interactive menu (`/root/vps_manager.sh`):
 
-* **Manual Reset:** Immediately run the bandwidth carry-over for all servers or a specific VPS ID. The results of the operation will be displayed on screen.
+* **Configure:** edit the host, credentials and parallel jobs.
+* **Manual Reset:** reset all VPSs, reset one VPS ID, or do a dry run. The results are shown on screen.
+* **Automation:** enable a daily (00:00), monthly (1st, 02:00) or last-day-of-month (23:30) cron job, disable it, or edit the crontab. The menu shows the current job.
 
-* **Manage Automation:**
+Command-line options:
 
-  * Enable a daily or monthly cron job.
-
-  * Disable and remove any existing cron job set by this script.
-
-  * View the current status of the cron job.
-
-  * Manually edit your crontab file using the `nano` editor.
+| Option | What it does |
+|---|---|
+| `--cron` | Reset all VPSs and append the output to the log. The cron job runs this. |
+| `--dry-run [ID]` | Show what a reset of all VPSs, or of one VPS ID, would change. Changes nothing. |
+| `--list-vps` | List the VPSs with usage, limit and status. |
+| `--help` | Show the help. |
 
 ## 📝 Logging
 
-The script generates two log files in the `/tmp/` directory for easy debugging and auditing:
+Logs are written to `/root`. Set `DIAG_DIR` to use another directory.
 
-* `/tmp/reset_band.log`: A detailed, verbose log of all actions.
+* `/root/reset_band.log`: a detailed log of every run.
+* `/root/reset_band_changes.log`: an audit log with one line for each VPS that was changed, skipped, reset on an unlimited plan, or whose limit update failed. For example: `2026-10-19 00:00:01  VPS 101  300/1000 => 0/700 (plan 2)`.
 
-* `/tmp/reset_band_changes.log`: A clean audit log that only contains entries for successfully processed servers.
+## 🩺 Troubleshooting
+
+* **`Not a JSON API response`**: the host or port is wrong, or the credentials are wrong. The log shows the first 200 characters of the reply.
+* **`API error ...`**: Virtualizor rejected the call. Check the key's ACL and IP whitelist.
+* **`SSL certificate problem: self-signed certificate`**: the master uses Virtualizor's default certificate. Install a valid certificate on the master. Or, on a trusted network only, use the non-SSL port: `HOST="http://IP:4084"`.
+* **`usage reset but limit update failed`**: the usage of that VPS is now 0, but its limit was not lowered. A new run cannot recover the old usage. Set the limit that the log line gives in the panel.
+
+## 🧪 Tests
+
+The tests run the script against a mock Virtualizor API. They need `python3`:
+
+```bash
+bash tests/test_reset_band.sh
+```
+
 ## 📜 License
 
 This project is licensed under the Apache-2.0 License.
